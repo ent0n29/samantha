@@ -16,19 +16,23 @@ import (
 	"github.com/ent0n29/samantha/internal/observability"
 	"github.com/ent0n29/samantha/internal/protocol"
 	"github.com/ent0n29/samantha/internal/session"
-	"github.com/ent0n29/samantha/internal/voice"
 )
+
+type Orchestrator interface {
+	RunConnection(ctx context.Context, s *session.Session, inbound <-chan any, outbound chan<- any) error
+	PreviewTTS(ctx context.Context, voiceID, modelID, personaID, text string) ([]byte, string, error)
+}
 
 type Server struct {
 	cfg          config.Config
 	sessions     *session.Manager
-	orchestrator *voice.Orchestrator
+	orchestrator Orchestrator
 	metrics      *observability.Metrics
 	upgrader     websocket.Upgrader
 	static       http.Handler
 }
 
-func New(cfg config.Config, sessions *session.Manager, orchestrator *voice.Orchestrator, metrics *observability.Metrics) *Server {
+func New(cfg config.Config, sessions *session.Manager, orchestrator Orchestrator, metrics *observability.Metrics) *Server {
 	return &Server{
 		cfg:          cfg,
 		sessions:     sessions,
@@ -157,6 +161,10 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	if sessionID == "" {
 		respondError(w, http.StatusBadRequest, "missing_session_id", "query parameter session_id is required")
+		return
+	}
+	if s.orchestrator == nil {
+		respondError(w, http.StatusNotImplemented, "unavailable", "orchestrator not configured")
 		return
 	}
 
