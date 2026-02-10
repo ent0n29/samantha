@@ -1,0 +1,290 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/gorilla/websocket"
+
+	"github.com/antoniostano/samantha/internal/config"
+	"github.com/antoniostano/samantha/internal/observability"
+	"github.com/antoniostano/samantha/internal/protocol"
+	"github.com/antoniostano/samantha/internal/session"
+	"github.com/antoniostano/samantha/internal/voice"
+)
+
+type Server struct {
+	cfg          config.Config
+	sessions     *session.Manager
+	orchestrator *voice.Orchestrator
+	metrics      *observability.Metrics
+	upgrader     websocket.Upgrader
+	static       http.Handler
+}
+
+func New(cfg config.Config, sessions *session.Manager, orchestrator *voice.Orchestrator, metrics *observability.Metrics) *Server {
+	return &Server{
+		cfg:          cfg,
+		sessions:     sessions,
+		orchestrator: orchestrator,
+		metrics:      metrics,
+		static:       newStaticHandler(),
+		upgrader: websocket.Upgrader{
+			ReadBufferSize:  4096,
+			WriteBufferSize: 4096,
+			CheckOrigin: func(r *http.Request) bool {
+				return true
+			},
+		},
+	}
+}
+
+func (s *Server) Router() http.Handler {
+	r := chi.NewRouter()
+	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
+	})
+	r.Get("/ui", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/ui/", http.StatusTemporaryRedirect)
+	})
+	r.Handle("/ui/*", http.StripPrefix("/ui/", s.static))
+
+	r.Get("/healthz", s.handleHealth)
+	r.Get("/readyz", s.handleReady)
+	r.Get("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		observability.MetricsHandler().ServeHTTP(w, r)
+	})
+
+	r.Post("/v1/voice/session", s.handleCreateSession)
+	r.Post("/v1/voice/session/{id}/end", s.handleEndSession)
+	r.Get("/v1/voice/session/ws", s.handleSessionWS)
+	r.Get("/v1/onboarding/status", s.handleOnboardingStatus)
+	r.Get("/v1/voice/voices", s.handleListVoices)
+	r.Post("/v1/voice/tts/preview", s.handlePreviewTTS)
+
+	return r
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
+	respondJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
+func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	var req session.CreateRequest
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, errEmptyBody) {
+		respondError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		req.UserID = "anonymous"
+	}
+	if strings.TrimSpace(req.PersonaID) == "" {
+		req.PersonaID = "warm"
+	}
+	if strings.TrimSpace(req.VoiceID) == "" {
+		defaultVoice := s.cfg.ElevenLabsTTSVoice
+		if strings.EqualFold(strings.TrimSpace(s.cfg.VoiceProvider), "local") {
+			defaultVoice = s.cfg.LocalKokoroVoice
+			if strings.TrimSpace(defaultVoice) == "" {
+				defaultVoice = "af_heart"
+			}
+		}
+		req.VoiceID = defaultVoice
+	}
+
+	sess := s.sessions.Create(req.UserID, req.PersonaID, req.VoiceID)
+	s.metrics.ActiveSessions.Set(float64(s.sessions.ActiveCount()))
+	s.metrics.SessionEvents.WithLabelValues("created").Inc()
+
+	respondJSON(w, http.StatusCreated, session.CreateResponse{
+		SessionID:       sess.ID,
+		UserID:          sess.UserID,
+		Status:          sess.Status,
+		PersonaID:       sess.PersonaID,
+		VoiceID:         sess.VoiceID,
+		StartedAt:       sess.StartedAt,
+		LastActivityAt:  sess.LastActivityAt,
+		InactivityTTLMS: s.cfg.SessionInactivityTimeout.Milliseconds(),
+	})
+}
+
+func (s *Server) handleEndSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if strings.TrimSpace(id) == "" {
+		respondError(w, http.StatusBadRequest, "invalid_session_id", "missing session id")
+		return
+	}
+
+	sess, err := s.sessions.End(id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "session_not_found", err.Error())
+		return
+	}
+	s.metrics.ActiveSessions.Set(float64(s.sessions.ActiveCount()))
+	s.metrics.SessionEvents.WithLabelValues("ended").Inc()
+	respondJSON(w, http.StatusOK, sess)
+}
+
+func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	if sessionID == "" {
+		respondError(w, http.StatusBadRequest, "missing_session_id", "query parameter session_id is required")
+		return
+	}
+
+	sess, err := s.sessions.Get(sessionID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "session_not_found", err.Error())
+		return
+	}
+
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	s.metrics.SessionEvents.WithLabelValues("ws_connected").Inc()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	inbound := make(chan any, 256)
+	outbound := make(chan any, 256)
+	runDone := make(chan struct{})
+
+	go func() {
+		defer close(runDone)
+		_ = s.orchestrator.RunConnection(ctx, sess, inbound, outbound)
+	}()
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-outbound:
+				if err := conn.WriteJSON(msg); err != nil {
+					cancel()
+					return
+				}
+				t, ok := messageTypeOf(msg)
+				if ok {
+					s.metrics.WSMessages.WithLabelValues("outbound", string(t)).Inc()
+				}
+			}
+		}
+	}()
+
+	conn.SetReadLimit(2 << 20)
+	_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		return nil
+	})
+
+	for {
+		msgType, data, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		if msgType != websocket.TextMessage {
+			continue
+		}
+		parsed, err := protocol.ParseClientMessage(data)
+		if err != nil {
+			_ = conn.WriteJSON(protocol.ErrorEvent{
+				Type:      protocol.TypeErrorEvent,
+				SessionID: sessionID,
+				Code:      "invalid_client_message",
+				Source:    "gateway",
+				Retryable: false,
+				Detail:    err.Error(),
+			})
+			continue
+		}
+
+		if t, ok := messageTypeOf(parsed); ok {
+			s.metrics.WSMessages.WithLabelValues("inbound", string(t)).Inc()
+		}
+		select {
+		case <-ctx.Done():
+			break
+		case inbound <- parsed:
+		}
+	}
+
+	cancel()
+	close(inbound)
+	<-runDone
+	<-writerDone
+	s.metrics.SessionEvents.WithLabelValues("ws_disconnected").Inc()
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+var errEmptyBody = errors.New("empty body")
+
+func decodeJSON(r *http.Request, out any) error {
+	if r.Body == nil {
+		return errEmptyBody
+	}
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(out); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "eof") {
+			return errEmptyBody
+		}
+		return err
+	}
+	return nil
+}
+
+func respondJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func respondError(w http.ResponseWriter, status int, code, message string) {
+	respondJSON(w, status, errorResponse{Error: message, Code: code})
+}
+
+func messageTypeOf(v any) (protocol.MessageType, bool) {
+	switch m := v.(type) {
+	case protocol.ClientAudioChunk:
+		return m.Type, true
+	case protocol.ClientControl:
+		return m.Type, true
+	case protocol.STTPartial:
+		return m.Type, true
+	case protocol.STTCommitted:
+		return m.Type, true
+	case protocol.AssistantTextDelta:
+		return m.Type, true
+	case protocol.AssistantAudioChunk:
+		return m.Type, true
+	case protocol.AssistantTurnEnd:
+		return m.Type, true
+	case protocol.SystemEvent:
+		return m.Type, true
+	case protocol.ErrorEvent:
+		return m.Type, true
+	default:
+		return "", false
+	}
+}

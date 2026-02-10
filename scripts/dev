@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# Prefer native toolchains (Apple Silicon) and repo-local binaries.
+ARM64_GO="$HOME/.local/arm64/go/bin/go"
+ARM64_NODE_BIN="$HOME/.local/arm64/node/bin"
+
+# 1) Prefer ~/.local/bin (arm64 uv, etc)
+if [[ -d "$HOME/.local/bin" ]]; then
+  export PATH="$HOME/.local/bin:$PATH"
+fi
+# 2) Prefer repo-local whisper.cpp builds
+if [[ -d "$ROOT/.tools/whispercpp/bin" ]]; then
+  export PATH="$ROOT/.tools/whispercpp/bin:$PATH"
+fi
+# 3) Prefer an arm64 node if present
+if [[ -d "$ARM64_NODE_BIN" ]]; then
+  export PATH="$ARM64_NODE_BIN:$PATH"
+fi
+# 4) Keep common Homebrew locations available, but do not let them override the above.
+for d in /opt/homebrew/bin /usr/local/bin; do
+  if [[ -d "$d" && ":$PATH:" != *":$d:"* ]]; then
+    export PATH="$PATH:$d"
+  fi
+done
+
+# Use the Samantha-tuned OpenClaw agent unless the user overrides it.
+export OPENCLAW_AGENT_ID="${OPENCLAW_AGENT_ID:-samantha}"
+
+# Load local env if present (do not commit .env).
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
+AUTH_MAIN="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
+AUTH_SAM="$HOME/.openclaw/agents/samantha/agent/auth-profiles.json"
+
+# Only sync Codex tokens into OpenClaw when the auth profile is missing.
+if [[ ! -f "$AUTH_MAIN" ]] || ! grep -q '"openai-codex:default"' "$AUTH_MAIN" 2>/dev/null; then
+  python3 "$ROOT/scripts/openclaw_bootstrap_from_codex.py" >/dev/null 2>&1 || true
+fi
+
+# Ensure the Samantha OpenClaw agent exists (non-interactive).
+if command -v openclaw >/dev/null 2>&1; then
+  if ! openclaw agents list --json 2>/dev/null | grep -q '"id":"samantha"'; then
+    openclaw agents add samantha \
+      --non-interactive \
+      --workspace "$ROOT/openclaw/samantha-workspace" \
+      --model openai-codex/gpt-5.3-codex \
+      --json >/dev/null 2>&1 || true
+  fi
+  if [[ -f "$AUTH_MAIN" && ! -f "$AUTH_SAM" ]]; then
+    mkdir -p "$(dirname "$AUTH_SAM")" || true
+    cp -f "$AUTH_MAIN" "$AUTH_SAM" || true
+    chmod 600 "$AUTH_SAM" >/dev/null 2>&1 || true
+  fi
+fi
+
+VOICE_PROVIDER_LOWER="$(echo "${VOICE_PROVIDER:-auto}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+
+if [[ "$VOICE_PROVIDER_LOWER" == "elevenlabs" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
+  echo "Note: VOICE_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set (server will fail to start)." >&2
+fi
+
+# Auto mode falls back to mock voice if local voice isn't available.
+if [[ "$VOICE_PROVIDER_LOWER" == "auto" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
+  echo "Note: ELEVENLABS_API_KEY is not set; VOICE_PROVIDER=auto will try local voice, then mock." >&2
+fi
+
+needs_local_voice=0
+if [[ "$VOICE_PROVIDER_LOWER" == "local" ]]; then
+  needs_local_voice=1
+fi
+if [[ "$VOICE_PROVIDER_LOWER" == "auto" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
+  needs_local_voice=1
+fi
+
+if [[ "$needs_local_voice" == "1" ]]; then
+  need_setup=0
+
+  # Prefer repo-local arm64 whisper.cpp tools. If only x86_64 tools are found, rebuild.
+  whisper_cli_path=""
+  whisper_server_path=""
+  if command -v whisper-cli >/dev/null 2>&1; then
+    whisper_cli_path="$(command -v whisper-cli)"
+  fi
+  if command -v whisper-server >/dev/null 2>&1; then
+    whisper_server_path="$(command -v whisper-server)"
+  fi
+
+  if [[ -z "$whisper_cli_path" ]] || ! file "$whisper_cli_path" 2>/dev/null | grep -q 'arm64'; then
+    need_setup=1
+  fi
+  if [[ -z "$whisper_server_path" ]] || ! file "$whisper_server_path" 2>/dev/null | grep -q 'arm64'; then
+    need_setup=1
+  fi
+
+  if [[ ! -x "$ROOT/.venv/bin/python3" && ! -x "$ROOT/.venv/bin/python" ]]; then
+    need_setup=1
+  else
+    py_check="$ROOT/.venv/bin/python"
+    if [[ -x "$ROOT/.venv/bin/python3" ]]; then
+      py_check="$ROOT/.venv/bin/python3"
+    fi
+    if ! arch -arm64 "$py_check" -c 'import platform, numpy; print(platform.machine())' 2>/dev/null | grep -q '^arm64'; then
+      need_setup=1
+    fi
+  fi
+
+  if [[ "${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}" != /* ]]; then
+    model_path="$ROOT/${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}"
+  else
+    model_path="${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}"
+  fi
+  if [[ ! -f "$model_path" ]]; then
+    need_setup=1
+  fi
+
+  if [[ "$need_setup" == "1" ]]; then
+    echo "Bootstrapping local voice (whisper.cpp + kokoro). This may take a few minutes on first run..." >&2
+    if ! "$ROOT/scripts/setup_local_voice.sh"; then
+      if [[ "$VOICE_PROVIDER_LOWER" == "local" ]]; then
+        echo "Local voice setup failed. Fix the errors above, then rerun: make dev" >&2
+        exit 1
+      fi
+      echo "Local voice setup failed; continuing (VOICE_PROVIDER=$VOICE_PROVIDER_LOWER)." >&2
+    fi
+  fi
+fi
+
+if lsof -iTCP:8080 -sTCP:LISTEN -n -P >/dev/null 2>&1; then
+  pid="$(lsof -iTCP:8080 -sTCP:LISTEN -n -P -t | head -n 1 || true)"
+  if [[ -n "${pid:-}" ]]; then
+    cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    # Common cases:
+    # - `go run ./cmd/samantha` -> temp binary under $TMPDIR/go-build.../exe/samantha
+    # - `bin/samantha`
+    if [[ "$cmd" == *"/go-build"*"exe/samantha"* || "$cmd" == *"cmd/samantha"* || "$cmd" == *"bin/samantha"* || "$cmd" == *"samantha-companion"* ]]; then
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 0.4
+    fi
+  fi
+fi
+
+echo "UI: http://127.0.0.1:8080/ui/  (add ?onboarding=1 to rerun first-run checks)" >&2
+
+if [[ -x "$ARM64_GO" ]]; then
+  exec arch -arm64 "$ARM64_GO" run ./cmd/samantha
+fi
+
+exec go run ./cmd/samantha
