@@ -1,0 +1,14 @@
+# OpenClaw agent workspace
+#
+# Keep the versioned "personality" files in git, but ignore anything the agent
+# downloads/generates while chatting (repos, web scraps, logs, etc).
+*
+
+!.gitignore
+!AGENTS.md
+!HEARTBEAT.md
+!IDENTITY.md
+!SOUL.md
+!TOOLS.md
+!USER.md
+
