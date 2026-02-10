@@ -13,13 +13,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/antoniostano/samantha/internal/memory"
-	"github.com/antoniostano/samantha/internal/observability"
-	"github.com/antoniostano/samantha/internal/openclaw"
-	"github.com/antoniostano/samantha/internal/policy"
-	"github.com/antoniostano/samantha/internal/protocol"
-	"github.com/antoniostano/samantha/internal/reliability"
-	"github.com/antoniostano/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/memory"
+	"github.com/ent0n29/samantha/internal/observability"
+	"github.com/ent0n29/samantha/internal/openclaw"
+	"github.com/ent0n29/samantha/internal/policy"
+	"github.com/ent0n29/samantha/internal/protocol"
+	"github.com/ent0n29/samantha/internal/reliability"
+	"github.com/ent0n29/samantha/internal/session"
 )
 
 type PersonaProfile struct {

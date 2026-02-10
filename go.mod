@@ -1,4 +1,4 @@
-module github.com/antoniostano/samantha
+module github.com/ent0n29/samantha
 
 go 1.24.0
 

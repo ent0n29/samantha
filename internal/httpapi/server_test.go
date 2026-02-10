@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/antoniostano/samantha/internal/config"
-	"github.com/antoniostano/samantha/internal/observability"
-	"github.com/antoniostano/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/config"
+	"github.com/ent0n29/samantha/internal/observability"
+	"github.com/ent0n29/samantha/internal/session"
 )
 
 func TestCreateAndEndSession(t *testing.T) {

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/antoniostano/samantha/internal/reliability"
+	"github.com/ent0n29/samantha/internal/reliability"
 	"github.com/gorilla/websocket"
 )
 

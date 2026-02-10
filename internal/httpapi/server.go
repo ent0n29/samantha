@@ -11,11 +11,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 
-	"github.com/antoniostano/samantha/internal/config"
-	"github.com/antoniostano/samantha/internal/observability"
-	"github.com/antoniostano/samantha/internal/protocol"
-	"github.com/antoniostano/samantha/internal/session"
-	"github.com/antoniostano/samantha/internal/voice"
+	"github.com/ent0n29/samantha/internal/config"
+	"github.com/ent0n29/samantha/internal/observability"
+	"github.com/ent0n29/samantha/internal/protocol"
+	"github.com/ent0n29/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/voice"
 )
 
 type Server struct {
