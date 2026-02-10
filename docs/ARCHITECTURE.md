@@ -32,6 +32,9 @@ Samantha is a small, voice-first runtime that gives OpenClaw a realtime micropho
 - Memory store:
   - In-memory: `internal/memory/inmemory.go`
   - Postgres (optional): `internal/memory/postgres.go`
+- OpenClaw workspace:
+  - Template (versioned): `openclaw/samantha-workspace/`
+  - Runtime scratch (not versioned): `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID/` (default)
 
 ## Notes / Constraints
 

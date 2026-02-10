@@ -29,7 +29,7 @@ Configuration lives in `.env` (ignored). Start from `.env.example`.
 - `internal/voice/`: orchestrator + STT/TTS interfaces and providers
 - `internal/openclaw/`: OpenClaw adapters (CLI/HTTP/mock)
 - `internal/memory/`: conversation memory store (in-memory by default; Postgres optional)
-- `openclaw/samantha-workspace/`: agent workspace/personality
+- `openclaw/samantha-workspace/`: versioned workspace template (personality). Runtime workspace lives outside the repo (see `.env.example`).
 
 Architecture notes: `docs/ARCHITECTURE.md`
 
@@ -44,4 +44,3 @@ Architecture notes: `docs/ARCHITECTURE.md`
 - Never commit secrets (API keys, tokens, auth profiles).
 - Do not add any client-side code that embeds long-lived keys.
 - Prefer server-minted single-use tokens for browser realtime integrations.
-

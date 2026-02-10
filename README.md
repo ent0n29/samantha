@@ -28,6 +28,8 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `VOICE_PROVIDER=auto|local|elevenlabs|mock`
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
 - `OPENCLAW_HTTP_URL` (when using `http`)
+- `OPENCLAW_AGENT_ID` (OpenClaw agent id; default `samantha` in `make dev`)
+- `OPENCLAW_WORKSPACE_DIR` (per-user OpenClaw workspace; defaults to `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID`)
 - `OPENCLAW_CLI_PATH` (when using `cli` or `auto`)
 - `DATABASE_URL` (optional; enables Postgres-backed memory)
 
@@ -44,6 +46,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 By default, `make dev` will:
 
 - Attempt to bootstrap OpenClaw auth from your Codex login (if present).
-- Ensure a local OpenClaw agent exists using `openclaw/samantha-workspace/`.
+- Ensure a local OpenClaw agent exists using a per-user workspace (default: `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID`).
+- Sync the repo’s workspace template in `openclaw/samantha-workspace/` into that per-user workspace each run.
 
 If `openclaw` is not installed/configured, the server runs with a mock brain.

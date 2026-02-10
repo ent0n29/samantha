@@ -39,22 +39,89 @@ if [[ -f "$ROOT/.env" ]]; then
 fi
 
 AUTH_MAIN="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
-AUTH_SAM="$HOME/.openclaw/agents/samantha/agent/auth-profiles.json"
+AUTH_SAM="$HOME/.openclaw/agents/${OPENCLAW_AGENT_ID}/agent/auth-profiles.json"
 
 # Only sync Codex tokens into OpenClaw when the auth profile is missing.
 if [[ ! -f "$AUTH_MAIN" ]] || ! grep -q '"openai-codex:default"' "$AUTH_MAIN" 2>/dev/null; then
   python3 "$ROOT/scripts/openclaw_bootstrap_from_codex.py" >/dev/null 2>&1 || true
 fi
 
-# Ensure the Samantha OpenClaw agent exists (non-interactive).
+# Ensure the selected OpenClaw agent exists (non-interactive).
 if command -v openclaw >/dev/null 2>&1; then
-  if ! openclaw agents list --json 2>/dev/null | grep -q '"id":"samantha"'; then
-    openclaw agents add samantha \
-      --non-interactive \
-      --workspace "$ROOT/openclaw/samantha-workspace" \
-      --model openai-codex/gpt-5.3-codex \
-      --json >/dev/null 2>&1 || true
+  AGENT_ID="${OPENCLAW_AGENT_ID:-samantha}"
+  # Mutable OpenClaw scratch (downloaded repos, web scrapes, tool outputs) must not live in the git repo.
+  # Keep the repo directory as a template only, and sync it into a per-user workspace.
+  WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspaces/$AGENT_ID}"
+  if [[ "$WORKSPACE_DIR" != /* ]]; then
+    WORKSPACE_DIR="$ROOT/$WORKSPACE_DIR"
   fi
+
+  TEMPLATE_DIR="$ROOT/openclaw/samantha-workspace"
+  mkdir -p "$WORKSPACE_DIR" >/dev/null 2>&1 || true
+  for f in AGENTS.md HEARTBEAT.md IDENTITY.md SOUL.md TOOLS.md USER.md; do
+    if [[ -f "$TEMPLATE_DIR/$f" ]]; then
+      cp -f "$TEMPLATE_DIR/$f" "$WORKSPACE_DIR/$f" >/dev/null 2>&1 || true
+    fi
+  done
+
+  agents_json="$(openclaw agents list --json 2>/dev/null || true)"
+  agent_exists=0
+  if [[ -n "$agents_json" ]] && printf "%s" "$agents_json" | grep -q "\"id\":\"$AGENT_ID\""; then
+    agent_exists=1
+  fi
+
+  if [[ "$agent_exists" == "1" ]]; then
+    existing_workspace="$(AGENTS_JSON="$agents_json" python3 -c 'import json,os,sys
+aid=sys.argv[1]
+raw=os.environ.get("AGENTS_JSON","")
+try:
+  arr=json.loads(raw) if raw else []
+except Exception:
+  arr=[]
+ws=""
+for a in arr:
+  if a.get("id")==aid:
+    ws=str(a.get("workspace","") or "")
+    break
+print(ws.strip())' "$AGENT_ID" 2>/dev/null || true)"
+
+    if [[ -z "$existing_workspace" ]]; then
+      echo "OpenClaw agent '$AGENT_ID' exists but its workspace path could not be determined." >&2
+      echo "Fix it by re-creating the agent or setting OPENCLAW_WORKSPACE_DIR." >&2
+      echo "" >&2
+      echo "  openclaw agents list --json" >&2
+      echo "  openclaw agents delete $AGENT_ID" >&2
+      echo "  make dev" >&2
+      exit 1
+    fi
+
+    desired_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$WORKSPACE_DIR" 2>/dev/null || echo "$WORKSPACE_DIR")"
+    existing_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$existing_workspace" 2>/dev/null || echo "$existing_workspace")"
+    if [[ "$existing_real" != "$desired_real" ]]; then
+      echo "OpenClaw agent '$AGENT_ID' workspace mismatch:" >&2
+      echo "  configured: $existing_workspace" >&2
+      echo "  expected:   $WORKSPACE_DIR" >&2
+      echo "" >&2
+      echo "To fix:" >&2
+      echo "  1) Delete and recreate the agent:" >&2
+      echo "     openclaw agents delete $AGENT_ID" >&2
+      echo "     make dev" >&2
+      echo "  2) Or point Samantha at the existing workspace:" >&2
+      echo "     export OPENCLAW_WORKSPACE_DIR=\"$existing_workspace\"" >&2
+      echo "  3) Or pick a different agent id:" >&2
+      echo "     export OPENCLAW_AGENT_ID=\"${AGENT_ID}-$(date +%s)\"" >&2
+      exit 1
+    fi
+  else
+    if ! openclaw agents add "$AGENT_ID" \
+      --non-interactive \
+      --workspace "$WORKSPACE_DIR" \
+      --model openai-codex/gpt-5.3-codex \
+      --json >/dev/null 2>&1; then
+      echo "Note: failed to create OpenClaw agent '$AGENT_ID' (continuing with mock brain if needed)." >&2
+    fi
+  fi
+
   if [[ -f "$AUTH_MAIN" && ! -f "$AUTH_SAM" ]]; then
     mkdir -p "$(dirname "$AUTH_SAM")" || true
     cp -f "$AUTH_MAIN" "$AUTH_SAM" || true
