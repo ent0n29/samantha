@@ -1,13 +1,25 @@
+# Local env (never commit secrets)
 .env
 .env.*
 !.env.example
 
+# Local tooling / caches
 .venv/
 .models/
+.tools/
+.tmp/
+.DS_Store
 
+# IDE/editor
+.idea/
+.vscode/
+
+# Build outputs
 bin/
+*.test
+*.out
+coverage.out
 
+# Logs / pids
 *.log
 *.pid
-
-.tools/

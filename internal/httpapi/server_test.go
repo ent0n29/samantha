@@ -21,26 +21,20 @@ func TestCreateAndEndSession(t *testing.T) {
 	sessions := session.NewManager(cfg.SessionInactivityTimeout)
 	metrics := observability.NewMetrics("test_httpapi_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
 	srv := New(cfg, sessions, nil, metrics)
-
-	ts := httptest.NewServer(srv.Router())
-	defer ts.Close()
+	router := srv.Router()
 
 	createReq := map[string]string{
 		"user_id":    "user-1",
 		"persona_id": "warm",
 	}
 	body, _ := json.Marshal(createReq)
-	res, err := http.Post(ts.URL+"/v1/voice/session", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("create session request error = %v", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusCreated {
-		t.Fatalf("create status = %d, want %d", res.StatusCode, http.StatusCreated)
+	createRes := doRequest(t, router, http.MethodPost, "/v1/voice/session", "application/json", body)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d", createRes.Code, http.StatusCreated)
 	}
 
 	var created map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+	if err := json.Unmarshal(createRes.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	sessionID, _ := created["session_id"].(string)
@@ -48,13 +42,9 @@ func TestCreateAndEndSession(t *testing.T) {
 		t.Fatalf("missing session_id in create response: %+v", created)
 	}
 
-	endRes, err := http.Post(ts.URL+"/v1/voice/session/"+sessionID+"/end", "application/json", bytes.NewReader(nil))
-	if err != nil {
-		t.Fatalf("end session request error = %v", err)
-	}
-	defer endRes.Body.Close()
-	if endRes.StatusCode != http.StatusOK {
-		t.Fatalf("end status = %d, want %d", endRes.StatusCode, http.StatusOK)
+	endRes := doRequest(t, router, http.MethodPost, "/v1/voice/session/"+sessionID+"/end", "application/json", nil)
+	if endRes.Code != http.StatusOK {
+		t.Fatalf("end status = %d, want %d", endRes.Code, http.StatusOK)
 	}
 }
 
@@ -65,42 +55,21 @@ func TestUIRoutes(t *testing.T) {
 	sessions := session.NewManager(cfg.SessionInactivityTimeout)
 	metrics := observability.NewMetrics("test_httpapi_ui_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
 	srv := New(cfg, sessions, nil, metrics)
+	router := srv.Router()
 
-	ts := httptest.NewServer(srv.Router())
-	defer ts.Close()
-
-	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
+	rootRes := doRequest(t, router, http.MethodGet, "/", "", nil)
+	if rootRes.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("GET / status = %d, want %d", rootRes.Code, http.StatusTemporaryRedirect)
 	}
-
-	rootRes, err := client.Get(ts.URL + "/")
-	if err != nil {
-		t.Fatalf("GET / error = %v", err)
-	}
-	defer rootRes.Body.Close()
-	if rootRes.StatusCode != http.StatusTemporaryRedirect {
-		t.Fatalf("GET / status = %d, want %d", rootRes.StatusCode, http.StatusTemporaryRedirect)
-	}
-	if got := rootRes.Header.Get("Location"); got != "/ui/" {
+	if got := rootRes.Header().Get("Location"); got != "/ui/" {
 		t.Fatalf("GET / location = %q, want %q", got, "/ui/")
 	}
 
-	uiRes, err := http.Get(ts.URL + "/ui/")
-	if err != nil {
-		t.Fatalf("GET /ui/ error = %v", err)
+	uiRes := doRequest(t, router, http.MethodGet, "/ui/", "", nil)
+	if uiRes.Code != http.StatusOK {
+		t.Fatalf("GET /ui/ status = %d, want %d", uiRes.Code, http.StatusOK)
 	}
-	defer uiRes.Body.Close()
-	if uiRes.StatusCode != http.StatusOK {
-		t.Fatalf("GET /ui/ status = %d, want %d", uiRes.StatusCode, http.StatusOK)
-	}
-
-	var body bytes.Buffer
-	if _, err := body.ReadFrom(uiRes.Body); err != nil {
-		t.Fatalf("reading /ui/ body failed: %v", err)
-	}
-	if !strings.Contains(body.String(), "id=\"pulse\"") {
+	if !strings.Contains(uiRes.Body.String(), "id=\"pulse\"") {
 		t.Fatalf("GET /ui/ body missing expected content")
 	}
 }
@@ -114,21 +83,15 @@ func TestOnboardingStatus(t *testing.T) {
 	sessions := session.NewManager(cfg.SessionInactivityTimeout)
 	metrics := observability.NewMetrics("test_httpapi_onboarding_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
 	srv := New(cfg, sessions, nil, metrics)
+	router := srv.Router()
 
-	ts := httptest.NewServer(srv.Router())
-	defer ts.Close()
-
-	res, err := http.Get(ts.URL + "/v1/onboarding/status")
-	if err != nil {
-		t.Fatalf("GET /v1/onboarding/status error = %v", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
+	res := doRequest(t, router, http.MethodGet, "/v1/onboarding/status", "", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
 	}
 
 	var payload map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if payload["voice_provider"] != "mock" {
@@ -140,4 +103,15 @@ func TestOnboardingStatus(t *testing.T) {
 	if _, ok := payload["checks"]; !ok {
 		t.Fatalf("missing checks in response: %+v", payload)
 	}
+}
+
+func doRequest(t *testing.T, handler http.Handler, method, path, contentType string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
 }

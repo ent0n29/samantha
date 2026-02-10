@@ -163,6 +163,7 @@ func main() {
 		cfg.FirstAudioSLO,
 		defaultVoiceID,
 		defaultModelID,
+		cfg.VoiceProvider,
 	)
 
 	api := httpapi.New(cfg, sessions, orchestrator, metrics)

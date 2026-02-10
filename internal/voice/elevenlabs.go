@@ -120,7 +120,11 @@ func (p *ElevenLabsProvider) StartStream(ctx context.Context, voiceID, modelID s
 		return nil, fmt.Errorf("dial tts websocket: %w", err)
 	}
 
-	s := &elevenTTSStream{conn: conn, events: make(chan TTSEvent, 512)}
+	s := &elevenTTSStream{
+		conn:         conn,
+		outputFormat: p.cfg.DefaultOutputFormat,
+		events:       make(chan TTSEvent, 512),
+	}
 	go s.readLoop()
 	// Prime the stream as documented for TTS websocket flows.
 	_ = s.writeJSON(map[string]any{
@@ -207,10 +211,11 @@ func (s *elevenSTTSession) safeClose() {
 }
 
 type elevenTTSStream struct {
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	closeOnce sync.Once
-	events    chan TTSEvent
+	conn         *websocket.Conn
+	outputFormat string
+	writeMu      sync.Mutex
+	closeOnce    sync.Once
+	events       chan TTSEvent
 }
 
 func (s *elevenTTSStream) SendText(_ context.Context, text string, tryTrigger bool) error {
@@ -255,7 +260,11 @@ func (s *elevenTTSStream) readLoop() {
 		}
 
 		if audio := asString(raw["audio"]); audio != "" {
-			s.events <- TTSEvent{Type: TTSEventAudio, AudioBase64: audio, Format: "base64_audio"}
+			format := strings.TrimSpace(s.outputFormat)
+			if format == "" {
+				format = "mp3"
+			}
+			s.events <- TTSEvent{Type: TTSEventAudio, AudioBase64: audio, Format: format}
 		}
 		if asBool(raw["isFinal"]) || asBool(raw["is_final"]) {
 			s.events <- TTSEvent{Type: TTSEventFinal}

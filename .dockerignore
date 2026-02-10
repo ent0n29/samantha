@@ -1,5 +1,20 @@
 .git
 .gitignore
-bin
+
+# Editor / local config
+.github
+.idea
+.vscode
+
+# Local env (never ship)
+.env
+.env.*
+
+# Local tooling / caches
+.tools
+.models
+.venv
 .tmp
+
+bin
 .DS_Store

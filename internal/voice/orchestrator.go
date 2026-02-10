@@ -43,6 +43,8 @@ type Orchestrator struct {
 	firstAudioSLO time.Duration
 	defaultVoice  string
 	defaultModel  string
+	sttLabel      string
+	ttsLabel      string
 	profiles      map[string]PersonaProfile
 }
 
@@ -56,7 +58,12 @@ func NewOrchestrator(
 	firstAudioSLO time.Duration,
 	defaultVoice string,
 	defaultModel string,
+	voiceProvider string,
 ) *Orchestrator {
+	vp := strings.ToLower(strings.TrimSpace(voiceProvider))
+	if vp == "" {
+		vp = "unknown"
+	}
 	profiles := map[string]PersonaProfile{
 		"warm": {
 			ID:           "warm",
@@ -100,6 +107,8 @@ func NewOrchestrator(
 		firstAudioSLO: firstAudioSLO,
 		defaultVoice:  defaultVoice,
 		defaultModel:  defaultModel,
+		sttLabel:      vp + "_stt",
+		ttsLabel:      vp + "_tts",
 		profiles:      profiles,
 	}
 }
@@ -411,7 +420,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					// Non-fatal: happens when commit is requested with too little uncommitted audio.
 					continue
 				}
-				o.metrics.ProviderErrors.WithLabelValues("elevenlabs_stt", evt.Code).Inc()
+				o.metrics.ProviderErrors.WithLabelValues(o.sttLabel, evt.Code).Inc()
 				o.send(outbound, protocol.ErrorEvent{
 					Type:      protocol.TypeErrorEvent,
 					SessionID: s.ID,
@@ -484,7 +493,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 						AudioBase64: evt.AudioBase64,
 					})
 				case TTSEventError:
-					o.metrics.ProviderErrors.WithLabelValues("elevenlabs_tts", evt.Code).Inc()
+					o.metrics.ProviderErrors.WithLabelValues(o.ttsLabel, evt.Code).Inc()
 					o.send(outbound, protocol.ErrorEvent{
 						Type:      protocol.TypeErrorEvent,
 						SessionID: s.ID,
