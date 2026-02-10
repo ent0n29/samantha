@@ -87,11 +87,11 @@ print(ws.strip())' "$AGENT_ID" 2>/dev/null || true)"
 
     if [[ -z "$existing_workspace" ]]; then
       echo "OpenClaw agent '$AGENT_ID' exists but its workspace path could not be determined." >&2
-      echo "Fix it by re-creating the agent or setting OPENCLAW_WORKSPACE_DIR." >&2
+      echo "Fix it by pointing Samantha at the existing workspace or choosing a new agent id." >&2
       echo "" >&2
       echo "  openclaw agents list --json" >&2
-      echo "  openclaw agents delete $AGENT_ID" >&2
-      echo "  make dev" >&2
+      echo "  export OPENCLAW_AGENT_ID=\"$AGENT_ID\"" >&2
+      echo "  export OPENCLAW_WORKSPACE_DIR=\"...\"" >&2
       exit 1
     fi
 
@@ -102,14 +102,15 @@ print(ws.strip())' "$AGENT_ID" 2>/dev/null || true)"
       echo "  configured: $existing_workspace" >&2
       echo "  expected:   $WORKSPACE_DIR" >&2
       echo "" >&2
-      echo "To fix:" >&2
-      echo "  1) Delete and recreate the agent:" >&2
-      echo "     openclaw agents delete $AGENT_ID" >&2
-      echo "     make dev" >&2
-      echo "  2) Or point Samantha at the existing workspace:" >&2
+      echo "To fix (non-destructive options first):" >&2
+      echo "  1) Keep using the configured workspace (fastest):" >&2
       echo "     export OPENCLAW_WORKSPACE_DIR=\"$existing_workspace\"" >&2
-      echo "  3) Or pick a different agent id:" >&2
+      echo "  2) Use a different agent id for this repo (keeps your existing agent state intact):" >&2
       echo "     export OPENCLAW_AGENT_ID=\"${AGENT_ID}-$(date +%s)\"" >&2
+      echo "  3) If you want to migrate the existing agent without losing sessions/state:" >&2
+      echo "     update the agent workspace path in ~/.openclaw/openclaw.json" >&2
+      echo "  4) Last resort (destructive): delete + recreate the agent:" >&2
+      echo "     openclaw agents delete $AGENT_ID" >&2
       exit 1
     fi
   else
