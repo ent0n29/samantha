@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,8 @@ type Config struct {
 	SessionInactivityTimeout time.Duration
 	FirstAudioSLO            time.Duration
 	MetricsNamespace         string
+
+	AllowAnyOrigin bool
 
 	VoiceProvider string
 
@@ -48,6 +51,7 @@ func Load() (Config, error) {
 	cfg := Config{
 		BindAddr:            envOrDefault("APP_BIND_ADDR", ":8080"),
 		MetricsNamespace:    envOrDefault("APP_METRICS_NAMESPACE", "samantha"),
+		AllowAnyOrigin:      false,
 		VoiceProvider:       envOrDefault("VOICE_PROVIDER", "auto"),
 		ElevenLabsWSBaseURL: envOrDefault("ELEVENLABS_WS_BASE_URL", "wss://api.elevenlabs.io"),
 		// Default to a warm female premade voice for the Samantha prototype.
@@ -90,6 +94,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.MemoryEmbeddingDim, err = intFromEnv("MEMORY_EMBEDDING_DIM", cfg.MemoryEmbeddingDim)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AllowAnyOrigin, err = boolFromEnv("APP_ALLOW_ANY_ORIGIN", cfg.AllowAnyOrigin)
 	if err != nil {
 		return Config{}, err
 	}
@@ -175,4 +183,19 @@ func intFromEnv(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s parse error: %w", key, err)
 	}
 	return n, nil
+}
+
+func boolFromEnv(key string, fallback bool) (bool, error) {
+	v := strings.ToLower(stringsTrimSpace(key))
+	if v == "" {
+		return fallback, nil
+	}
+	switch v {
+	case "1", "true", "t", "yes", "y", "on":
+		return true, nil
+	case "0", "false", "f", "no", "n", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("%s parse error: expected bool", key)
+	}
 }

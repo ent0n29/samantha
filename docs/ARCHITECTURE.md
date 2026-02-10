@@ -17,6 +17,7 @@ Samantha is a small, voice-first runtime that gives OpenClaw a realtime micropho
 
 ## Components
 
+- Composition root (dependency wiring): `internal/app/`
 - HTTP + WebSocket gateway: `internal/httpapi/`
 - Session lifecycle: `internal/session/`
 - Realtime orchestration: `internal/voice/`
@@ -36,4 +37,3 @@ Samantha is a small, voice-first runtime that gives OpenClaw a realtime micropho
 
 - The system is optimized for tight iteration on latency and "feel", not for production hardening.
 - OpenClaw streaming depends on the adapter: HTTP streaming can produce incremental deltas; CLI mode currently returns a single final chunk.
-

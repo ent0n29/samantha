@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -38,7 +39,25 @@ func New(cfg config.Config, sessions *session.Manager, orchestrator *voice.Orche
 			ReadBufferSize:  4096,
 			WriteBufferSize: 4096,
 			CheckOrigin: func(r *http.Request) bool {
-				return true
+				// Default: only allow browser websocket connections from the same origin.
+				// This prevents other websites from driving the user's mic session if
+				// Samantha is ever exposed beyond localhost.
+				if cfg.AllowAnyOrigin {
+					return true
+				}
+				origin := strings.TrimSpace(r.Header.Get("Origin"))
+				if origin == "" {
+					// Non-browser clients often omit Origin. Allow them.
+					return true
+				}
+				u, err := url.Parse(origin)
+				if err != nil {
+					return false
+				}
+				if u.Scheme != "http" && u.Scheme != "https" {
+					return false
+				}
+				return strings.EqualFold(u.Host, r.Host)
 			},
 		},
 	}

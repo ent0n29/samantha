@@ -9,6 +9,7 @@ Samantha is a small Go HTTP/WebSocket server plus a browser UI that does:
 If OpenClaw isn't configured, it falls back to a deterministic mock "brain" so you can iterate on the voice loop.
 
 See `docs/ARCHITECTURE.md` for the component map and data flow.
+API reference: `docs/API.md`.
 
 ## Quickstart (macOS)
 
