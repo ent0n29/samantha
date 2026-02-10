@@ -7,8 +7,11 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ent0n29/samantha/internal/audio"
 )
 
 type voiceSummary struct {
@@ -195,13 +198,25 @@ func (s *Server) handlePreviewTTS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", mimeForTTSFormat(format))
+	contentType := mimeForTTSFormat(format)
+	out := audio
+	if sampleRate, ok := pcmSampleRate(format); ok {
+		wav, err := audio2wav(out, sampleRate)
+		if err != nil {
+			respondError(w, http.StatusBadGateway, "tts_preview_failed", err.Error())
+			return
+		}
+		out = wav
+		contentType = "audio/wav"
+	}
+
+	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "no-store")
 	if strings.TrimSpace(format) != "" {
 		w.Header().Set("X-Audio-Format", strings.TrimSpace(format))
 	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(audio)
+	_, _ = w.Write(out)
 }
 
 func mimeForTTSFormat(format string) string {
@@ -216,4 +231,33 @@ func mimeForTTSFormat(format string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+func audio2wav(pcm []byte, sampleRate int) ([]byte, error) {
+	return audio.EncodeWAVPCM16LE(pcm, sampleRate)
+}
+
+func pcmSampleRate(format string) (int, bool) {
+	f := strings.ToLower(strings.TrimSpace(format))
+	idx := strings.Index(f, "pcm_")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := f[idx+len("pcm_"):]
+	n := 0
+	for n < len(rest) {
+		c := rest[n]
+		if c < '0' || c > '9' {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return 16000, true
+	}
+	sr, err := strconv.Atoi(rest[:n])
+	if err != nil || sr <= 0 {
+		return 16000, true
+	}
+	return sr, true
 }

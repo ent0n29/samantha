@@ -19,6 +19,7 @@ type ElevenLabsConfig struct {
 	APIKey              string
 	WSBaseURL           string
 	STTModelID          string
+	STTCommitStrategy   string
 	DefaultOutputFormat string
 }
 
@@ -33,8 +34,11 @@ func NewElevenLabsProvider(cfg ElevenLabsConfig) *ElevenLabsProvider {
 	if strings.TrimSpace(cfg.STTModelID) == "" {
 		cfg.STTModelID = "scribe_v1"
 	}
+	if strings.TrimSpace(cfg.STTCommitStrategy) == "" {
+		cfg.STTCommitStrategy = "manual"
+	}
 	if strings.TrimSpace(cfg.DefaultOutputFormat) == "" {
-		cfg.DefaultOutputFormat = "mp3_44100_128"
+		cfg.DefaultOutputFormat = "pcm_16000"
 	}
 	return &ElevenLabsProvider{cfg: cfg}
 }
@@ -46,7 +50,7 @@ func (p *ElevenLabsProvider) StartSession(ctx context.Context, _ string) (STTSes
 	}
 	q := u.Query()
 	q.Set("model_id", p.cfg.STTModelID)
-	q.Set("commit_strategy", "vad")
+	q.Set("commit_strategy", p.cfg.STTCommitStrategy)
 	q.Set("include_timestamps", "true")
 	u.RawQuery = q.Encode()
 

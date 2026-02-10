@@ -39,7 +39,7 @@ const state = {
   playbackGain: null,
   playbackNextTime: 0,
   playbackSources: new Set(),
-  wavScheduleQueue: Promise.resolve(),
+  streamScheduleQueue: Promise.resolve(),
   ignoredTurns: new Set(),
 
   presence: "disconnected",
@@ -1632,11 +1632,130 @@ async function scheduleWavSegment(bytes, token) {
 
 function enqueueWavStream(bytes) {
   const token = state.playbackToken;
-  state.wavScheduleQueue = state.wavScheduleQueue
+  state.streamScheduleQueue = state.streamScheduleQueue
     .then(() => scheduleWavSegment(bytes, token))
     .catch((err) => {
       // Keep queue alive even if a single segment fails.
       logError(`wav stream error: ${stringifyError(err)}`);
+    });
+}
+
+function pcmSampleRateFromFormat(format) {
+  const f = String(format || "").toLowerCase();
+  const idx = f.indexOf("pcm_");
+  if (idx < 0) {
+    return null;
+  }
+  const rest = f.slice(idx + 4);
+  let digits = "";
+  for (let i = 0; i < rest.length; i += 1) {
+    const c = rest[i];
+    if (c < "0" || c > "9") {
+      break;
+    }
+    digits += c;
+  }
+  if (!digits) {
+    return MIC_TARGET_SAMPLE_RATE;
+  }
+  const sr = Number.parseInt(digits, 10);
+  if (!Number.isFinite(sr) || sr <= 0) {
+    return MIC_TARGET_SAMPLE_RATE;
+  }
+  return sr;
+}
+
+async function schedulePCM16Segment(bytes, sampleRate, token) {
+  if (token !== state.playbackToken) {
+    return;
+  }
+
+  let ctx;
+  try {
+    ctx = await ensurePlaybackContext();
+  } catch (err) {
+    setCaption("Tap once to enable audio.", "Then try again.", { clearAfterMs: 3200 });
+    logError(`audio context blocked: ${stringifyError(err)}`);
+    return;
+  }
+  if (token !== state.playbackToken) {
+    return;
+  }
+
+  const masterGain = state.playbackGain;
+  if (!masterGain) {
+    return;
+  }
+
+  const frames = Math.floor(bytes.length / 2);
+  if (frames <= 0) {
+    return;
+  }
+
+  const sr = sampleRate && sampleRate > 0 ? sampleRate : MIC_TARGET_SAMPLE_RATE;
+  const buffer = ctx.createBuffer(1, frames, sr);
+  const ch0 = buffer.getChannelData(0);
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, frames * 2);
+  for (let i = 0; i < frames; i += 1) {
+    ch0[i] = dv.getInt16(i * 2, true) / 32768;
+  }
+
+  const t0 = ctx.currentTime;
+  const baseStart = t0 + 0.03;
+  if (!state.playbackNextTime || state.playbackNextTime < baseStart - 0.1) {
+    state.playbackNextTime = baseStart;
+  }
+  const startAt = Math.max(baseStart, state.playbackNextTime);
+  const endAt = startAt + buffer.duration;
+
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+
+  const segGain = ctx.createGain();
+  const fade = Math.min(0.012, buffer.duration * 0.25);
+  const fadeInEnd = startAt + fade;
+  const fadeOutStart = Math.max(fadeInEnd, endAt - fade);
+  segGain.gain.setValueAtTime(0, startAt);
+  segGain.gain.linearRampToValueAtTime(1, fadeInEnd);
+  segGain.gain.setValueAtTime(1, fadeOutStart);
+  segGain.gain.linearRampToValueAtTime(0, endAt);
+
+  src.connect(segGain);
+  segGain.connect(masterGain);
+
+  const entry = { src, gain: segGain, token };
+  state.playbackSources.add(entry);
+  src.onended = () => {
+    state.playbackSources.delete(entry);
+    try {
+      segGain.disconnect();
+    } catch (_err) {
+      // ignore
+    }
+  };
+
+  try {
+    src.start(startAt);
+  } catch (err) {
+    state.playbackSources.delete(entry);
+    try {
+      segGain.disconnect();
+    } catch (_err) {
+      // ignore
+    }
+    logError(`pcm schedule failed: ${stringifyError(err)}`);
+    return;
+  }
+
+  state.playbackNextTime = endAt;
+}
+
+function enqueuePCMStream(bytes, sampleRate) {
+  const token = state.playbackToken;
+  state.streamScheduleQueue = state.streamScheduleQueue
+    .then(() => schedulePCM16Segment(bytes, sampleRate, token))
+    .catch((err) => {
+      logError(`pcm stream error: ${stringifyError(err)}`);
     });
 }
 
@@ -1659,7 +1778,7 @@ function stopPlayback({ clearBuffered } = {}) {
   }
 
   stopWebAudio();
-  state.wavScheduleQueue = Promise.resolve();
+  state.streamScheduleQueue = Promise.resolve();
 
   // Ensure future playback doesn't wait behind an interrupted element.
   state.audioQueue = Promise.resolve();
@@ -2003,6 +2122,12 @@ function handleAssistantAudio(msg) {
   if (format.includes("wav")) {
     // Local TTS emits self-contained WAV segments; schedule them with WebAudio so playback is gapless.
     enqueueWavStream(bytes);
+    return;
+  }
+  const pcmSR = pcmSampleRateFromFormat(format);
+  if (pcmSR) {
+    // ElevenLabs PCM streams are raw PCM16LE; schedule directly via WebAudio (no buffering until turn end).
+    enqueuePCMStream(bytes, pcmSR);
     return;
   }
   const arr = state.audioByTurn.get(turnID) || [];

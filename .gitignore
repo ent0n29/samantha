@@ -23,3 +23,6 @@ coverage.out
 # Logs / pids
 *.log
 *.pid
+
+# OpenClaw workspace scratch (nested repos, local experiments)
+openclaw/samantha-workspace/polybot/

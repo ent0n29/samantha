@@ -32,7 +32,8 @@ func resolveVoiceProviders(cfg config.Config) (voiceSetup, error) {
 			APIKey:              cfg.ElevenLabsAPIKey,
 			WSBaseURL:           cfg.ElevenLabsWSBaseURL,
 			STTModelID:          cfg.ElevenLabsSTTModel,
-			DefaultOutputFormat: "mp3_44100_128",
+			STTCommitStrategy:   cfg.ElevenLabsSTTCommitStrategy,
+			DefaultOutputFormat: cfg.ElevenLabsTTSOutputFormat,
 		})
 		return voiceSetup{
 			sttProvider:      p,

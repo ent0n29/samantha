@@ -20,11 +20,13 @@ type Config struct {
 
 	VoiceProvider string
 
-	ElevenLabsAPIKey    string
-	ElevenLabsWSBaseURL string
-	ElevenLabsTTSVoice  string
-	ElevenLabsTTSModel  string
-	ElevenLabsSTTModel  string
+	ElevenLabsAPIKey            string
+	ElevenLabsWSBaseURL         string
+	ElevenLabsTTSVoice          string
+	ElevenLabsTTSModel          string
+	ElevenLabsSTTModel          string
+	ElevenLabsTTSOutputFormat   string
+	ElevenLabsSTTCommitStrategy string
 
 	LocalWhisperCLI       string
 	LocalWhisperModelPath string
@@ -58,7 +60,11 @@ func Load() (Config, error) {
 		ElevenLabsTTSVoice: envOrDefault("ELEVENLABS_TTS_VOICE_ID", "cgSgspJ2msm6clMCkdW9"),
 		ElevenLabsTTSModel: envOrDefault("ELEVENLABS_TTS_MODEL_ID", "eleven_multilingual_v2"),
 		ElevenLabsSTTModel: envOrDefault("ELEVENLABS_STT_MODEL_ID", "scribe_v2_realtime"),
-		LocalWhisperCLI:    envOrDefault("LOCAL_WHISPER_CLI", "whisper-cli"),
+		// Prefer low-latency PCM for realtime playback; preview endpoint wraps it as WAV.
+		ElevenLabsTTSOutputFormat: envOrDefault("ELEVENLABS_TTS_OUTPUT_FORMAT", "pcm_16000"),
+		// Prefer explicit commit driven by our client-side VAD and controls.
+		ElevenLabsSTTCommitStrategy: envOrDefault("ELEVENLABS_STT_COMMIT_STRATEGY", "manual"),
+		LocalWhisperCLI:             envOrDefault("LOCAL_WHISPER_CLI", "whisper-cli"),
 		// Default to a fast multilingual Whisper model for local realtime use.
 		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-base.bin"),
 		LocalWhisperLanguage:  envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),

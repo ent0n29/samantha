@@ -1,11 +1,9 @@
 package voice
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ent0n29/samantha/internal/audio"
 )
 
 type LocalConfig struct {
@@ -776,7 +776,7 @@ func (s *whisperServer) Transcribe(ctx context.Context, pcm16le []byte, sampleRa
 		return "", ctx.Err()
 	}
 
-	wav, err := encodeWAVPCM16LE(pcm16le, sampleRate)
+	wav, err := audio.EncodeWAVPCM16LE(pcm16le, sampleRate)
 	if err != nil {
 		return "", err
 	}
@@ -927,7 +927,7 @@ func (w whisperCPP) Transcribe(ctx context.Context, pcm16le []byte, sampleRate i
 	defer os.RemoveAll(tmpDir)
 
 	wavPath := filepath.Join(tmpDir, "audio.wav")
-	if err := writeWAVPCM16LE(wavPath, pcm16le, sampleRate); err != nil {
+	if err := audio.WriteWAVPCM16LEFile(wavPath, pcm16le, sampleRate); err != nil {
 		return "", err
 	}
 	outPrefix := filepath.Join(tmpDir, "out")
@@ -982,88 +982,6 @@ func (w whisperCPP) Transcribe(ctx context.Context, pcm16le []byte, sampleRate i
 	}
 	text := strings.TrimSpace(string(b))
 	return text, nil
-}
-
-func writeWAVPCM16LE(path string, pcm []byte, sampleRate int) error {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return writeWAVPCM16LETo(f, pcm, sampleRate)
-}
-
-func encodeWAVPCM16LE(pcm []byte, sampleRate int) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := writeWAVPCM16LETo(&buf, pcm, sampleRate); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func writeWAVPCM16LETo(out io.Writer, pcm []byte, sampleRate int) error {
-	const (
-		numChannels   = 1
-		bitsPerSample = 16
-		audioFormat   = 1 // PCM
-	)
-	if sampleRate <= 0 {
-		sampleRate = 16000
-	}
-	dataSize := uint32(len(pcm))
-	byteRate := uint32(sampleRate * numChannels * bitsPerSample / 8)
-	blockAlign := uint16(numChannels * bitsPerSample / 8)
-	w := bufio.NewWriter(out)
-	defer w.Flush()
-
-	// RIFF header.
-	if _, err := w.WriteString("RIFF"); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(36)+dataSize); err != nil {
-		return err
-	}
-	if _, err := w.WriteString("WAVE"); err != nil {
-		return err
-	}
-
-	// fmt chunk.
-	if _, err := w.WriteString("fmt "); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(16)); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint16(audioFormat)); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint16(numChannels)); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint32(sampleRate)); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, byteRate); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, blockAlign); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, uint16(bitsPerSample)); err != nil {
-		return err
-	}
-
-	// data chunk.
-	if _, err := w.WriteString("data"); err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.LittleEndian, dataSize); err != nil {
-		return err
-	}
-	if _, err := w.Write(pcm); err != nil {
-		return err
-	}
-	return nil
 }
 
 type kokoroWorker struct {

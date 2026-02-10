@@ -36,6 +36,8 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - Local (offline): whisper.cpp STT + Kokoro TTS (`VOICE_PROVIDER=local`)
   - First run: `make setup-local-voice`
 - ElevenLabs (optional): set `VOICE_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY`
+  - For lowest-latency playback, keep `ELEVENLABS_TTS_OUTPUT_FORMAT=pcm_16000` (default).
+  - If you want the backend to auto-decide when to commit transcripts, set `ELEVENLABS_STT_COMMIT_STRATEGY=vad` (default is `manual`, driven by the UI).
 
 ## Brain (OpenClaw)
 
