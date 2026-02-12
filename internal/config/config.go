@@ -19,6 +19,7 @@ type Config struct {
 
 	AllowAnyOrigin bool
 	StrictOutbound bool
+	UIAudioWorklet bool
 
 	WSBackpressureMode string
 
@@ -92,6 +93,7 @@ func Load() (Config, error) {
 		SessionRetention:         24 * time.Hour,
 		FirstAudioSLO:            700 * time.Millisecond,
 		StrictOutbound:           false,
+		UIAudioWorklet:           true,
 		WSBackpressureMode:       envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict: false,
 	}
@@ -121,6 +123,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.StrictOutbound, err = boolFromEnv("APP_STRICT_OUTBOUND", cfg.StrictOutbound)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UIAudioWorklet, err = boolFromEnv("APP_UI_AUDIO_WORKLET", cfg.UIAudioWorklet)
 	if err != nil {
 		return Config{}, err
 	}

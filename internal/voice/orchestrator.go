@@ -50,6 +50,13 @@ type Orchestrator struct {
 	outboundMode   string
 }
 
+const (
+	memoryContextLimit   = 8
+	memoryContextTimeout = 350 * time.Millisecond
+	memorySaveTimeout    = 2 * time.Second
+	ttsFinalizeTimeout   = 10 * time.Second
+)
+
 func NewOrchestrator(
 	sessions *session.Manager,
 	adapter openclaw.Adapter,
@@ -454,7 +461,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	profile := o.profileForSession(s)
 
 	redactedUserText, userChanged := policy.RedactPII(userText)
-	_ = o.memoryStore.SaveTurn(ctx, memory.TurnRecord{
+	o.saveTurnBestEffort(memory.TurnRecord{
 		ID:          uuid.NewString(),
 		UserID:      s.UserID,
 		SessionID:   s.ID,
@@ -464,18 +471,62 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		CreatedAt:   time.Now().UTC(),
 	})
 
-	recent, _ := o.memoryStore.RecentContext(ctx, s.UserID, 8)
+	settings := ttsSettingsForProfile(profile)
+	var (
+		preflightWG    sync.WaitGroup
+		ttsStream      TTSStream
+		ttsErr         error
+		ttsReadyAt     time.Time
+		recent         []memory.TurnRecord
+		recentErr      error
+		contextReadyAt time.Time
+	)
+	preflightWG.Add(2)
+	go func() {
+		defer preflightWG.Done()
+		ttsStream, ttsErr = o.ttsProvider.StartStream(ctx, profile.VoiceID, profile.ModelID, settings)
+		ttsReadyAt = time.Now()
+	}()
+	go func() {
+		defer preflightWG.Done()
+		if o.memoryStore == nil {
+			contextReadyAt = time.Now()
+			return
+		}
+		recentCtx, cancel := context.WithTimeout(ctx, memoryContextTimeout)
+		defer cancel()
+		recent, recentErr = o.memoryStore.RecentContext(recentCtx, s.UserID, memoryContextLimit)
+		contextReadyAt = time.Now()
+	}()
+	preflightWG.Wait()
+
+	if !ttsReadyAt.IsZero() {
+		if d := ttsReadyAt.Sub(committedAt); d > 0 {
+			o.metrics.ObserveTurnStage("commit_to_tts_ready", d)
+		}
+	}
+	if !contextReadyAt.IsZero() {
+		if d := contextReadyAt.Sub(committedAt); d > 0 {
+			o.metrics.ObserveTurnStage("commit_to_context_ready", d)
+		}
+	}
+
+	if ttsErr != nil {
+		return fmt.Errorf("start tts stream: %w", ttsErr)
+	}
+	if recentErr != nil && !errors.Is(recentErr, context.Canceled) {
+		if errors.Is(recentErr, context.DeadlineExceeded) {
+			o.metrics.SessionEvents.WithLabelValues("memory_context_timeout").Inc()
+		} else {
+			o.metrics.SessionEvents.WithLabelValues("memory_context_error").Inc()
+		}
+	}
+	defer ttsStream.Close()
+
 	contextLines := make([]string, 0, len(recent))
 	for _, r := range recent {
 		contextLines = append(contextLines, fmt.Sprintf("%s: %s", r.Role, r.Content))
 	}
-
-	settings := ttsSettingsForProfile(profile)
-	ttsStream, err := o.ttsProvider.StartStream(ctx, profile.VoiceID, profile.ModelID, settings)
-	if err != nil {
-		return fmt.Errorf("start tts stream: %w", err)
-	}
-	defer ttsStream.Close()
 
 	firstAudioObserved := false
 	firstTextObserved := false
@@ -574,20 +625,22 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-ttsDone:
-	case <-time.After(10 * time.Second):
+	case <-time.After(ttsFinalizeTimeout):
 		return fmt.Errorf("tts finalization timeout")
 	}
 
-	redactedAssistantText, assistantChanged := policy.RedactPII(assistantOut)
-	_ = o.memoryStore.SaveTurn(ctx, memory.TurnRecord{
-		ID:          uuid.NewString(),
-		UserID:      s.UserID,
-		SessionID:   s.ID,
-		Role:        "assistant",
-		Content:     redactedAssistantText,
-		PIIRedacted: assistantChanged,
-		CreatedAt:   time.Now().UTC(),
-	})
+	if strings.TrimSpace(assistantOut) != "" {
+		redactedAssistantText, assistantChanged := policy.RedactPII(assistantOut)
+		o.saveTurnBestEffort(memory.TurnRecord{
+			ID:          uuid.NewString(),
+			UserID:      s.UserID,
+			SessionID:   s.ID,
+			Role:        "assistant",
+			Content:     redactedAssistantText,
+			PIIRedacted: assistantChanged,
+			CreatedAt:   time.Now().UTC(),
+		})
+	}
 
 	o.send(outbound, protocol.AssistantTurnEnd{
 		Type:      protocol.TypeAssistantTurnEnd,
@@ -757,6 +810,19 @@ func clampFloat(v, min, max float64) float64 {
 		return max
 	}
 	return v
+}
+
+func (o *Orchestrator) saveTurnBestEffort(record memory.TurnRecord) {
+	if o.memoryStore == nil {
+		return
+	}
+	go func(r memory.TurnRecord) {
+		saveCtx, cancel := context.WithTimeout(context.Background(), memorySaveTimeout)
+		defer cancel()
+		if err := o.memoryStore.SaveTurn(saveCtx, r); err != nil {
+			o.metrics.SessionEvents.WithLabelValues("memory_save_failed").Inc()
+		}
+	}(record)
 }
 
 var wakeWordPrefixRe = regexp.MustCompile(`(?i)^\s*(?:(?:hey|hi|ok|okay)\b[\s,.:;!?-]*)?samantha\b[\s,.:;!?-]*\s*(.*)$`)

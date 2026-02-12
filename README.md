@@ -28,6 +28,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `VOICE_PROVIDER=auto|local|elevenlabs|mock`
 - `APP_SESSION_RETENTION` (ended-session retention window before pruning)
 - `APP_STRICT_OUTBOUND` + `APP_WS_BACKPRESSURE_MODE=drop|block`
+- `APP_UI_AUDIO_WORKLET` (attempt low-latency AudioWorklet mic capture in `/ui/`, with fallback)
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
 - `OPENCLAW_HTTP_URL` (when using `http`)
 - `OPENCLAW_HTTP_STREAM_STRICT` (strict streamed JSON validation for OpenClaw HTTP adapter)
@@ -53,3 +54,10 @@ By default, `make dev` will:
 - Sync the repo’s workspace template in `openclaw/samantha-workspace/` into that per-user workspace each run.
 
 If `openclaw` is not installed/configured, the server runs with a mock brain.
+
+## Performance Loop
+
+- Live latency snapshot API: `GET /v1/perf/latency`
+- Probe script:
+  - `make perf-latency`
+  - or `INTERVAL_SEC=1 SAMPLES=30 ./scripts/perf_latency_probe.sh http://127.0.0.1:8080`

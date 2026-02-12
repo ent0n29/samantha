@@ -17,9 +17,10 @@ type onboardingCheck struct {
 }
 
 type onboardingStatusResponse struct {
-	VoiceProvider string            `json:"voice_provider"`
-	BrainProvider string            `json:"brain_provider"`
-	Checks        []onboardingCheck `json:"checks"`
+	VoiceProvider  string            `json:"voice_provider"`
+	BrainProvider  string            `json:"brain_provider"`
+	UIAudioWorklet bool              `json:"ui_audio_worklet"`
+	Checks         []onboardingCheck `json:"checks"`
 }
 
 func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) {
@@ -76,9 +77,10 @@ func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) 
 	}
 
 	respondJSON(w, http.StatusOK, onboardingStatusResponse{
-		VoiceProvider: voiceProvider,
-		BrainProvider: brainProvider,
-		Checks:        checks,
+		VoiceProvider:  voiceProvider,
+		BrainProvider:  brainProvider,
+		UIAudioWorklet: s.cfg.UIAudioWorklet,
+		Checks:         checks,
 	})
 }
 

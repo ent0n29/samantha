@@ -87,6 +87,7 @@ func (s *Server) Router() http.Handler {
 	r.Post("/v1/voice/session/{id}/end", s.handleEndSession)
 	r.Get("/v1/voice/session/ws", s.handleSessionWS)
 	r.Get("/v1/onboarding/status", s.handleOnboardingStatus)
+	r.Get("/v1/perf/latency", s.handlePerfLatency)
 	r.Get("/v1/voice/voices", s.handleListVoices)
 	r.Post("/v1/voice/tts/preview", s.handlePreviewTTS)
 
@@ -237,14 +238,21 @@ readLoop:
 		}
 		parsed, err := protocol.ParseClientMessage(data)
 		if err != nil {
-			_ = conn.WriteJSON(protocol.ErrorEvent{
+			errEvent := protocol.ErrorEvent{
 				Type:      protocol.TypeErrorEvent,
 				SessionID: sessionID,
 				Code:      "invalid_client_message",
 				Source:    "gateway",
 				Retryable: false,
 				Detail:    err.Error(),
-			})
+			}
+			select {
+			case outbound <- errEvent:
+				s.metrics.ObserveOutboundMessage(string(protocol.TypeErrorEvent), "queued")
+			default:
+				// Keep websocket writes single-threaded; drop if outbound queue is saturated.
+				s.metrics.ObserveOutboundMessage(string(protocol.TypeErrorEvent), "drop_full")
+			}
 			continue
 		}
 

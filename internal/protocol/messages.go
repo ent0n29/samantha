@@ -96,31 +96,44 @@ type ErrorEvent struct {
 	Detail    string      `json:"detail"`
 }
 
+type clientInbound struct {
+	Type        MessageType `json:"type"`
+	SessionID   string      `json:"session_id"`
+	Seq         int         `json:"seq"`
+	PCM16Base64 string      `json:"pcm16_base64"`
+	SampleRate  int         `json:"sample_rate"`
+	TSMs        int64       `json:"ts_ms"`
+	Action      string      `json:"action"`
+}
+
 func ParseClientMessage(raw []byte) (any, error) {
-	var env Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
+	var inbound clientInbound
+	if err := json.Unmarshal(raw, &inbound); err != nil {
 		return nil, fmt.Errorf("invalid envelope: %w", err)
 	}
 
-	switch env.Type {
+	switch inbound.Type {
 	case TypeClientAudioChunk:
-		var msg ClientAudioChunk
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			return nil, err
-		}
-		if msg.SessionID == "" || msg.PCM16Base64 == "" || msg.SampleRate <= 0 {
+		if inbound.SessionID == "" || inbound.PCM16Base64 == "" || inbound.SampleRate <= 0 {
 			return nil, errors.New("invalid client_audio_chunk")
 		}
-		return msg, nil
+		return ClientAudioChunk{
+			Type:        TypeClientAudioChunk,
+			SessionID:   inbound.SessionID,
+			Seq:         inbound.Seq,
+			PCM16Base64: inbound.PCM16Base64,
+			SampleRate:  inbound.SampleRate,
+			TSMs:        inbound.TSMs,
+		}, nil
 	case TypeClientControl:
-		var msg ClientControl
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			return nil, err
-		}
-		if msg.SessionID == "" || msg.Action == "" {
+		if inbound.SessionID == "" || inbound.Action == "" {
 			return nil, errors.New("invalid client_control")
 		}
-		return msg, nil
+		return ClientControl{
+			Type:      TypeClientControl,
+			SessionID: inbound.SessionID,
+			Action:    inbound.Action,
+		}, nil
 	default:
 		return nil, ErrUnsupportedType
 	}

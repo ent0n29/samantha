@@ -1,6 +1,6 @@
 APP_NAME := samantha
 
-.PHONY: build test run fmt dev docker-build docker-run setup-local-voice
+.PHONY: build test run fmt dev docker-build docker-run setup-local-voice perf-latency
 
 # Prefer an arm64-native Go toolchain on Apple Silicon, even if the current shell is x86_64.
 ARM64_GO := $(HOME)/.local/arm64/go/bin/go
@@ -30,6 +30,9 @@ dev:
 
 setup-local-voice:
 	./scripts/setup_local_voice.sh
+
+perf-latency:
+	./scripts/perf_latency_probe.sh
 
 docker-build:
 	docker build -t $(APP_NAME):latest .

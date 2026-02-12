@@ -72,6 +72,14 @@ func TestUIRoutes(t *testing.T) {
 	if !strings.Contains(uiRes.Body.String(), "id=\"pulse\"") {
 		t.Fatalf("GET /ui/ body missing expected content")
 	}
+
+	workletRes := doRequest(t, router, http.MethodGet, "/ui/mic-worklet.js", "", nil)
+	if workletRes.Code != http.StatusOK {
+		t.Fatalf("GET /ui/mic-worklet.js status = %d, want %d", workletRes.Code, http.StatusOK)
+	}
+	if !strings.Contains(workletRes.Body.String(), "registerProcessor") {
+		t.Fatalf("GET /ui/mic-worklet.js missing expected content")
+	}
 }
 
 func TestOnboardingStatus(t *testing.T) {
@@ -79,6 +87,7 @@ func TestOnboardingStatus(t *testing.T) {
 		SessionInactivityTimeout: 2 * time.Minute,
 		VoiceProvider:            "mock",
 		OpenClawAdapterMode:      "mock",
+		UIAudioWorklet:           true,
 	}
 	sessions := session.NewManager(cfg.SessionInactivityTimeout)
 	metrics := observability.NewMetrics("test_httpapi_onboarding_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
@@ -100,8 +109,60 @@ func TestOnboardingStatus(t *testing.T) {
 	if payload["brain_provider"] != "mock" {
 		t.Fatalf("brain_provider = %v, want %v", payload["brain_provider"], "mock")
 	}
+	if payload["ui_audio_worklet"] != true {
+		t.Fatalf("ui_audio_worklet = %v, want %v", payload["ui_audio_worklet"], true)
+	}
 	if _, ok := payload["checks"]; !ok {
 		t.Fatalf("missing checks in response: %+v", payload)
+	}
+}
+
+func TestPerfLatencySnapshot(t *testing.T) {
+	cfg := config.Config{
+		SessionInactivityTimeout: 2 * time.Minute,
+	}
+	sessions := session.NewManager(cfg.SessionInactivityTimeout)
+	metrics := observability.NewMetrics("test_httpapi_perf_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
+	metrics.ObserveTurnStage("commit_to_first_text", 320*time.Millisecond)
+	metrics.ObserveTurnStage("commit_to_first_text", 410*time.Millisecond)
+	metrics.ObserveTurnStage("commit_to_first_audio", 780*time.Millisecond)
+
+	srv := New(cfg, sessions, nil, metrics)
+	router := srv.Router()
+	res := doRequest(t, router, http.MethodGet, "/v1/perf/latency", "", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	stagesAny, ok := payload["stages"].([]any)
+	if !ok || len(stagesAny) == 0 {
+		t.Fatalf("stages = %T (%v), want non-empty array", payload["stages"], payload["stages"])
+	}
+
+	found := false
+	for _, item := range stagesAny {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if m["stage"] == "commit_to_first_text" {
+			found = true
+			samples, ok := m["samples"].(float64)
+			if !ok {
+				t.Fatalf("samples type = %T, want number", m["samples"])
+			}
+			if got := int(samples); got < 2 {
+				t.Fatalf("samples = %d, want >=2", got)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("missing commit_to_first_text stage in %+v", stagesAny)
 	}
 }
 

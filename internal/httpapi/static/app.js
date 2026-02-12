@@ -1,5 +1,10 @@
 const MIC_TARGET_SAMPLE_RATE = 16000;
 const MIC_PROCESSOR_BUFFER = 2048;
+const MIC_WORKLET_MODULE = "mic-worklet.js";
+const MIC_TX_TARGET_MS = 45;
+const MIC_TX_MAX_LATENCY_MS = 60;
+const MIC_TX_TARGET_BYTES = Math.floor(MIC_TARGET_SAMPLE_RATE * 2 * (MIC_TX_TARGET_MS / 1000));
+const PERF_POLL_INTERVAL_MS = 2500;
 const BARGE_PREROLL_MS = 650;
 const BARGE_PREROLL_MAX_BYTES = Math.floor(MIC_TARGET_SAMPLE_RATE * 2 * (BARGE_PREROLL_MS / 1000));
 const BARGE_RMS_THRESHOLD = 0.02;
@@ -15,7 +20,7 @@ const VAD_MIN_RMS = 0.008;
 const VAD_RELATIVE_THRESHOLD = 2.4;
 const VAD_MAX_ZCR = 0.25; // zero-crossing rate (0..1). Higher tends to be noise/clicks.
 const VAD_MAX_CREST = 25; // peak/rms. Very high tends to be impulse noise (keyboard clicks).
-const VAD_ATTACK_FRAMES = 3; // ~250ms with 4096 @ 48kHz; prevents single-click triggers.
+const VAD_ATTACK_FRAMES = 3; // ~190-260ms depending capture frame size; prevents click triggers.
 const VAD_RELEASE_FRAMES = 8; // ~650ms hangover before auto-commit.
 
 const state = {
@@ -28,7 +33,10 @@ const state = {
   mediaStream: null,
   mediaSource: null,
   processor: null,
+  workletNode: null,
   silentGain: null,
+  micCaptureBackend: "none",
+  preferAudioWorklet: true,
   audioQueue: Promise.resolve(),
   audioByTurn: new Map(),
   audioFormatByTurn: new Map(),
@@ -69,6 +77,9 @@ const state = {
   bargeInActive: false,
   bargePreroll: [],
   bargePrerollBytes: 0,
+  micTxChunks: [],
+  micTxBytes: 0,
+  micTxFirstTSMs: 0,
 
   // Simple client-side VAD to trigger server-side commit without requiring a manual stop.
   lastVoiceAtMs: 0,
@@ -92,6 +103,11 @@ const state = {
   onboardingOpen: false,
   onboardingStatus: null,
   micPermission: "unknown", // unknown|granted|prompt|denied
+
+  perfPollTimer: null,
+  perfSnapshot: null,
+  perfError: "",
+  perfUpdatedAtMs: 0,
 };
 
 const el = {
@@ -112,6 +128,8 @@ const el = {
   disconnectBtn: document.getElementById("disconnectBtn"),
   endSessionBtn: document.getElementById("endSessionBtn"),
   debug: document.getElementById("debug"),
+  perfLatency: document.getElementById("perfLatency"),
+  perfUpdated: document.getElementById("perfUpdated"),
   events: document.getElementById("events"),
 
   onboard: document.getElementById("onboard"),
@@ -130,6 +148,7 @@ function init() {
   wirePointerParallax();
   initViz();
   startEnergyLoop();
+  renderPerfLatency();
 
   const onboarded = localStorage.getItem("samantha.onboarded") === "1";
   setPresence("disconnected", "Samantha", onboarded ? "Connecting…" : "Welcome. Hold anywhere for settings.");
@@ -295,6 +314,16 @@ function wireUI() {
       toggleDebug();
     }
   });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopPerfPolling();
+      return;
+    }
+    if (el.debug && !el.debug.classList.contains("hidden")) {
+      startPerfPolling();
+    }
+  });
 }
 
 function wireOnboarding() {
@@ -352,6 +381,9 @@ async function initOnboarding() {
     const res = await fetch("/v1/onboarding/status", { cache: "no-store" });
     if (res.ok) {
       state.onboardingStatus = await res.json();
+      if (Object.prototype.hasOwnProperty.call(state.onboardingStatus, "ui_audio_worklet")) {
+        state.preferAudioWorklet = Boolean(state.onboardingStatus.ui_audio_worklet);
+      }
     }
   } catch (_err) {
     // ignore
@@ -421,6 +453,13 @@ function renderOnboarding() {
           : "",
   };
   rows.push(micRow);
+  rows.push({
+    id: "mic_pipeline",
+    status: state.preferAudioWorklet ? "ok" : "warn",
+    label: "Mic pipeline",
+    detail: state.preferAudioWorklet ? "AudioWorklet + fallback" : "legacy ScriptProcessor forced",
+    fix: state.preferAudioWorklet ? "" : "Set APP_UI_AUDIO_WORKLET=true to enable low-latency capture attempts.",
+  });
 
   const status = state.onboardingStatus;
   if (status && Array.isArray(status.checks)) {
@@ -1267,19 +1306,167 @@ async function safeReadText(res) {
 function toggleDebug() {
   if (el.debug.classList.contains("hidden")) {
     el.debug.classList.remove("hidden");
+    startPerfPolling();
     logEvent("debug opened");
     return;
   }
   el.debug.classList.add("hidden");
+  stopPerfPolling();
   logEvent("debug closed");
+}
+
+function startPerfPolling() {
+  if (state.perfPollTimer) {
+    return;
+  }
+  void refreshPerfLatency();
+  state.perfPollTimer = window.setInterval(() => {
+    void refreshPerfLatency();
+  }, PERF_POLL_INTERVAL_MS);
+}
+
+function stopPerfPolling() {
+  if (!state.perfPollTimer) {
+    return;
+  }
+  window.clearInterval(state.perfPollTimer);
+  state.perfPollTimer = null;
+}
+
+async function refreshPerfLatency() {
+  try {
+    const res = await fetch("/v1/perf/latency", { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    state.perfSnapshot = await res.json();
+    state.perfUpdatedAtMs = Date.now();
+    state.perfError = "";
+  } catch (err) {
+    state.perfError = stringifyError(err);
+  }
+  renderPerfLatency();
+}
+
+function orderedPerfStages(snapshot) {
+  const stageOrder = [
+    "commit_to_tts_ready",
+    "commit_to_context_ready",
+    "commit_to_first_text",
+    "commit_to_first_audio",
+    "turn_total",
+  ];
+  const stageRank = new Map();
+  for (let i = 0; i < stageOrder.length; i += 1) {
+    stageRank.set(stageOrder[i], i);
+  }
+  const list = Array.isArray(snapshot?.stages) ? snapshot.stages.slice() : [];
+  list.sort((a, b) => {
+    const ar = stageRank.has(String(a?.stage || "")) ? stageRank.get(String(a?.stage || "")) : 99;
+    const br = stageRank.has(String(b?.stage || "")) ? stageRank.get(String(b?.stage || "")) : 99;
+    if (ar !== br) {
+      return ar - br;
+    }
+    return String(a?.stage || "").localeCompare(String(b?.stage || ""));
+  });
+  return list;
+}
+
+function displayStageName(stage) {
+  switch (stage) {
+    case "commit_to_tts_ready":
+      return "commit->tts-ready";
+    case "commit_to_context_ready":
+      return "commit->context-ready";
+    case "commit_to_first_text":
+      return "commit->first-text";
+    case "commit_to_first_audio":
+      return "commit->first-audio";
+    case "turn_total":
+      return "turn-total";
+    default:
+      return String(stage || "unknown");
+  }
+}
+
+function fmtMS(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) {
+    return "n/a";
+  }
+  return `${Math.round(v)}ms`;
+}
+
+function renderPerfLatency() {
+  if (!el.perfLatency || !el.perfUpdated) {
+    return;
+  }
+  const root = el.perfLatency;
+  root.innerHTML = "";
+
+  if (state.perfError) {
+    const row = document.createElement("div");
+    row.className = "perf-card is-bad";
+    row.textContent = `Latency fetch failed: ${state.perfError}`;
+    root.appendChild(row);
+    el.perfUpdated.textContent = "error";
+    return;
+  }
+
+  const snapshot = state.perfSnapshot;
+  if (!snapshot || !Array.isArray(snapshot.stages) || snapshot.stages.length === 0) {
+    const row = document.createElement("div");
+    row.className = "perf-card";
+    row.textContent = "Warming up latency window...";
+    root.appendChild(row);
+    el.perfUpdated.textContent = state.perfUpdatedAtMs ? "just now" : "idle";
+    return;
+  }
+
+  const stages = orderedPerfStages(snapshot);
+  for (const raw of stages) {
+    const stage = String(raw?.stage || "");
+    const p95 = Number(raw?.p95_ms);
+    const target = Number(raw?.target_p95_ms);
+    const samples = Number(raw?.samples) || 0;
+    const isPassing = Number.isFinite(target) && target > 0 && Number.isFinite(p95) && p95 <= target;
+
+    const card = document.createElement("div");
+    card.className = `perf-card ${isPassing ? "is-good" : target > 0 ? "is-bad" : ""}`.trim();
+
+    const title = document.createElement("div");
+    title.className = "perf-stage";
+    title.textContent = `${displayStageName(stage)} (${samples})`;
+
+    const body = document.createElement("div");
+    body.className = "perf-metrics";
+    const targetPart = target > 0 ? ` target-p95 ${fmtMS(target)}` : "";
+    body.textContent = `p50 ${fmtMS(raw?.p50_ms)}  p95 ${fmtMS(raw?.p95_ms)}  p99 ${fmtMS(raw?.p99_ms)}  avg ${fmtMS(raw?.avg_ms)}${targetPart}`;
+
+    card.appendChild(title);
+    card.appendChild(body);
+    root.appendChild(card);
+  }
+
+  if (state.perfUpdatedAtMs > 0) {
+    const agoSec = Math.max(0, Math.round((Date.now() - state.perfUpdatedAtMs) / 100) / 10);
+    el.perfUpdated.textContent = `${agoSec}s ago`;
+  } else {
+    el.perfUpdated.textContent = "idle";
+  }
 }
 
 function sendJSON(payload) {
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     return false;
   }
-  state.ws.send(JSON.stringify(payload));
-  return true;
+  try {
+    state.ws.send(JSON.stringify(payload));
+    return true;
+  } catch (err) {
+    logError(`ws send failed: ${stringifyError(err)}`);
+    return false;
+  }
 }
 
 function sendControl(action) {
@@ -1294,6 +1481,79 @@ function sendControl(action) {
   if (ok) {
     logEvent(`control sent: ${action}`);
   }
+}
+
+function mergePCMChunks(chunks, totalBytes) {
+  const knownBytes = Number(totalBytes) || 0;
+  let size = knownBytes;
+  if (size <= 0) {
+    size = 0;
+    for (const chunk of chunks || []) {
+      if (!chunk || chunk.length === 0) {
+        continue;
+      }
+      size += chunk.length;
+    }
+  }
+  if (size <= 0) {
+    return new Uint8Array(0);
+  }
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks || []) {
+    if (!chunk || chunk.length === 0) {
+      continue;
+    }
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return offset === size ? out : out.subarray(0, offset);
+}
+
+function sendClientAudioBytes(pcmBytes, tsMs) {
+  if (!state.sessionId || !pcmBytes || pcmBytes.length === 0) {
+    return false;
+  }
+  return sendJSON({
+    type: "client_audio_chunk",
+    session_id: state.sessionId,
+    seq: ++state.seq,
+    pcm16_base64: bytesToBase64(pcmBytes),
+    sample_rate: MIC_TARGET_SAMPLE_RATE,
+    ts_ms: tsMs || Date.now(),
+  });
+}
+
+function clearQueuedMicPCM() {
+  state.micTxChunks = [];
+  state.micTxBytes = 0;
+  state.micTxFirstTSMs = 0;
+}
+
+function queueMicPCM(pcmBytes, tsMs) {
+  if (!pcmBytes || pcmBytes.length === 0) {
+    return;
+  }
+  if (!state.micTxFirstTSMs) {
+    state.micTxFirstTSMs = tsMs || Date.now();
+  }
+  state.micTxChunks.push(pcmBytes);
+  state.micTxBytes += pcmBytes.length;
+}
+
+function flushQueuedMicPCM(nowMs, force) {
+  if (!state.micTxChunks || state.micTxChunks.length === 0 || state.micTxBytes <= 0) {
+    return false;
+  }
+  const now = nowMs || Date.now();
+  const firstTs = state.micTxFirstTSMs || now;
+  const ageMs = Math.max(0, now - firstTs);
+  if (!force && state.micTxBytes < MIC_TX_TARGET_BYTES && ageMs < MIC_TX_MAX_LATENCY_MS) {
+    return false;
+  }
+  const merged = mergePCMChunks(state.micTxChunks, state.micTxBytes);
+  clearQueuedMicPCM();
+  return sendClientAudioBytes(merged, firstTs);
 }
 
 function clearBargePreroll() {
@@ -1320,20 +1580,10 @@ function flushBargePreroll() {
     return;
   }
   const chunks = state.bargePreroll;
+  const bytes = state.bargePrerollBytes;
   clearBargePreroll();
-  for (const chunk of chunks) {
-    if (!chunk || chunk.length === 0) {
-      continue;
-    }
-    sendJSON({
-      type: "client_audio_chunk",
-      session_id: state.sessionId,
-      seq: ++state.seq,
-      pcm16_base64: bytesToBase64(chunk),
-      sample_rate: MIC_TARGET_SAMPLE_RATE,
-      ts_ms: Date.now(),
-    });
-  }
+  const merged = mergePCMChunks(chunks, bytes);
+  sendClientAudioBytes(merged, Date.now());
 }
 
 function clearVADPreroll() {
@@ -1360,20 +1610,10 @@ function flushVADPreroll() {
     return;
   }
   const chunks = state.vadPreroll;
+  const bytes = state.vadPrerollBytes;
   clearVADPreroll();
-  for (const chunk of chunks) {
-    if (!chunk || chunk.length === 0) {
-      continue;
-    }
-    sendJSON({
-      type: "client_audio_chunk",
-      session_id: state.sessionId,
-      seq: ++state.seq,
-      pcm16_base64: bytesToBase64(chunk),
-      sample_rate: MIC_TARGET_SAMPLE_RATE,
-      ts_ms: Date.now(),
-    });
-  }
+  const merged = mergePCMChunks(chunks, bytes);
+  sendClientAudioBytes(merged, Date.now());
 }
 
 function resetVAD() {
@@ -1385,6 +1625,7 @@ function resetVAD() {
   state.vadSilenceFrames = 0;
   state.vadStreaming = false;
   clearVADPreroll();
+  clearQueuedMicPCM();
 }
 
 function analyzeAudioFrame(float32) {
@@ -1784,6 +2025,163 @@ function stopPlayback({ clearBuffered } = {}) {
   state.audioQueue = Promise.resolve();
 }
 
+function processMicFrame(input, inputSampleRate) {
+  if (!state.micActive || !input || input.length === 0) {
+    return;
+  }
+  const metrics = analyzeAudioFrame(input);
+  const rms = metrics.rms || 0;
+  state.micEnergyTarget = rms * 3.2;
+
+  const downsampled = downsampleFloat32(input, inputSampleRate, MIC_TARGET_SAMPLE_RATE);
+  const pcmBytes = float32ToPCM16Bytes(downsampled);
+  if (pcmBytes.length === 0) {
+    return;
+  }
+
+  const speechLike = isSpeechLike(metrics);
+  if (!state.vadStreaming && state.presence !== "speaking") {
+    updateNoiseFloor(rms, speechLike);
+  }
+
+  const now = Date.now();
+
+  if (state.presence === "speaking" && !state.bargeInActive) {
+    // Flush any pending client-audio batch before we move into half-duplex hold.
+    flushQueuedMicPCM(now, true);
+    // Default: half-duplex to avoid self-feedback, but keep a short preroll so barge-in
+    // doesn't chop off the start of the user's utterance.
+    pushBargePreroll(pcmBytes);
+    if (speechLike && rms > BARGE_RMS_THRESHOLD) {
+      state.bargeInFrames += 1;
+      if (state.bargeInFrames >= BARGE_FRAMES_THRESHOLD && now - state.lastBargeSentAtMs > BARGE_COOLDOWN_MS) {
+        state.lastBargeSentAtMs = now;
+        state.bargeInFrames = 0;
+        state.bargeInActive = true;
+
+        // Treat this as a fresh utterance.
+        state.vadStreaming = true;
+        state.vadSpeechFrames = VAD_ATTACK_FRAMES;
+        state.vadSilenceFrames = 0;
+        state.sawSpeech = true;
+        state.lastVoiceAtMs = now;
+        clearVADPreroll();
+
+        stopPlayback({ clearBuffered: true });
+        sendControl("interrupt");
+        setCaption("…", "Listening…", { clearAfterMs: 1200 });
+        // Send the preroll immediately, then continue streaming live audio on the next frames.
+        flushBargePreroll();
+      }
+    } else {
+      state.bargeInFrames = Math.max(0, state.bargeInFrames - 1);
+    }
+    return;
+  }
+
+  if (state.presence !== "speaking") {
+    state.bargeInFrames = 0;
+    clearBargePreroll();
+  }
+
+  // Push-to-talk mode: stream continuously (commit is driven by the Stop control).
+  if (!state.handsFree) {
+    queueMicPCM(pcmBytes, now);
+    flushQueuedMicPCM(now, false);
+    return;
+  }
+
+  // VAD-gated streaming: only send audio to the backend while we're inside an utterance.
+  if (!state.vadStreaming) {
+    pushVADPreroll(pcmBytes);
+    if (speechLike) {
+      state.vadSpeechFrames += 1;
+    } else {
+      state.vadSpeechFrames = Math.max(0, state.vadSpeechFrames - 1);
+    }
+    if (state.vadSpeechFrames >= VAD_ATTACK_FRAMES) {
+      state.vadStreaming = true;
+      state.vadSilenceFrames = 0;
+      state.sawSpeech = true;
+      state.lastVoiceAtMs = now;
+      flushVADPreroll();
+    }
+    return;
+  }
+
+  // Streaming.
+  if (speechLike) {
+    state.lastVoiceAtMs = now;
+    state.vadSilenceFrames = 0;
+  } else {
+    state.vadSilenceFrames += 1;
+  }
+
+  queueMicPCM(pcmBytes, now);
+  flushQueuedMicPCM(now, false);
+
+  if (!speechLike && state.vadSilenceFrames >= VAD_RELEASE_FRAMES) {
+    flushQueuedMicPCM(now, true);
+    state.lastAutoCommitAtMs = now;
+    state.sawSpeech = false;
+    state.vadStreaming = false;
+    state.vadSpeechFrames = 0;
+    state.vadSilenceFrames = 0;
+    clearVADPreroll();
+    sendControl("stop");
+  }
+}
+
+function connectScriptProcessorCapture(ctx, source, silentGain) {
+  const processor = ctx.createScriptProcessor(MIC_PROCESSOR_BUFFER, 1, 1);
+  processor.onaudioprocess = (e) => {
+    processMicFrame(e.inputBuffer.getChannelData(0), ctx.sampleRate);
+  };
+  source.connect(processor);
+  processor.connect(silentGain);
+  silentGain.connect(ctx.destination);
+  return processor;
+}
+
+function resolveUIAsset(path) {
+  const base = window.location.pathname.startsWith("/ui/") ? "/ui/" : "/";
+  return new URL(path, `${window.location.origin}${base}`).toString();
+}
+
+async function connectAudioWorkletCapture(ctx, source, silentGain) {
+  if (!state.preferAudioWorklet) {
+    return null;
+  }
+  if (!ctx.audioWorklet || typeof window.AudioWorkletNode !== "function") {
+    return null;
+  }
+  try {
+    await ctx.audioWorklet.addModule(resolveUIAsset(MIC_WORKLET_MODULE));
+    const node = new AudioWorkletNode(ctx, "samantha-mic-capture", {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: "explicit",
+    });
+    node.port.onmessage = (evt) => {
+      const data = evt.data || {};
+      if (data.type !== "audio-frame" || !(data.samples instanceof ArrayBuffer)) {
+        return;
+      }
+      const sampleRate = Number(data.sampleRate) || ctx.sampleRate;
+      processMicFrame(new Float32Array(data.samples), sampleRate);
+    };
+    source.connect(node);
+    node.connect(silentGain);
+    silentGain.connect(ctx.destination);
+    return node;
+  } catch (err) {
+    logEvent(`audio worklet unavailable: ${stringifyError(err)}`);
+    return null;
+  }
+}
+
 async function startMic() {
   if (state.micActive) {
     return;
@@ -1813,138 +2211,24 @@ async function startMic() {
       ctx = new AudioContextClass();
     }
     const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(MIC_PROCESSOR_BUFFER, 1, 1);
     const silentGain = ctx.createGain();
     silentGain.gain.value = 0;
-
-    processor.onaudioprocess = (e) => {
-      if (!state.micActive) {
-        return;
-      }
-      const input = e.inputBuffer.getChannelData(0);
-      const metrics = analyzeAudioFrame(input);
-      const rms = metrics.rms || 0;
-      state.micEnergyTarget = rms * 3.2;
-
-      const downsampled = downsampleFloat32(input, ctx.sampleRate, MIC_TARGET_SAMPLE_RATE);
-      const pcmBytes = float32ToPCM16Bytes(downsampled);
-      if (pcmBytes.length === 0) {
-        return;
-      }
-
-      const speechLike = isSpeechLike(metrics);
-      if (!state.vadStreaming && state.presence !== "speaking") {
-        updateNoiseFloor(rms, speechLike);
-      }
-
-      const now = Date.now();
-
-      if (state.presence === "speaking" && !state.bargeInActive) {
-        // Default: half-duplex to avoid self-feedback, but keep a short preroll so barge-in
-        // doesn't chop off the start of the user's utterance.
-        pushBargePreroll(pcmBytes);
-        if (speechLike && rms > BARGE_RMS_THRESHOLD) {
-          state.bargeInFrames += 1;
-          if (state.bargeInFrames >= BARGE_FRAMES_THRESHOLD && now - state.lastBargeSentAtMs > BARGE_COOLDOWN_MS) {
-            state.lastBargeSentAtMs = now;
-            state.bargeInFrames = 0;
-            state.bargeInActive = true;
-
-            // Treat this as a fresh utterance.
-            state.vadStreaming = true;
-            state.vadSpeechFrames = VAD_ATTACK_FRAMES;
-            state.vadSilenceFrames = 0;
-            state.sawSpeech = true;
-            state.lastVoiceAtMs = now;
-            clearVADPreroll();
-
-            stopPlayback({ clearBuffered: true });
-            sendControl("interrupt");
-            setCaption("…", "Listening…", { clearAfterMs: 1200 });
-            // Send the preroll immediately, then continue streaming live audio on the next frames.
-            flushBargePreroll();
-          }
-        } else {
-          state.bargeInFrames = Math.max(0, state.bargeInFrames - 1);
-        }
-        return;
-      }
-
-      if (state.presence !== "speaking") {
-        state.bargeInFrames = 0;
-        clearBargePreroll();
-      }
-
-      // Push-to-talk mode: stream continuously (commit is driven by the Stop control).
-      if (!state.handsFree) {
-        sendJSON({
-          type: "client_audio_chunk",
-          session_id: state.sessionId,
-          seq: ++state.seq,
-          pcm16_base64: bytesToBase64(pcmBytes),
-          sample_rate: MIC_TARGET_SAMPLE_RATE,
-          ts_ms: now,
-        });
-        return;
-      }
-
-      // VAD-gated streaming: only send audio to the backend while we're inside an utterance.
-      if (!state.vadStreaming) {
-        pushVADPreroll(pcmBytes);
-        if (speechLike) {
-          state.vadSpeechFrames += 1;
-        } else {
-          state.vadSpeechFrames = Math.max(0, state.vadSpeechFrames - 1);
-        }
-        if (state.vadSpeechFrames >= VAD_ATTACK_FRAMES) {
-          state.vadStreaming = true;
-          state.vadSilenceFrames = 0;
-          state.sawSpeech = true;
-          state.lastVoiceAtMs = now;
-          flushVADPreroll();
-        }
-        return;
-      }
-
-      // Streaming.
-      if (speechLike) {
-        state.lastVoiceAtMs = now;
-        state.vadSilenceFrames = 0;
-      } else {
-        state.vadSilenceFrames += 1;
-      }
-
-      sendJSON({
-        type: "client_audio_chunk",
-        session_id: state.sessionId,
-        seq: ++state.seq,
-        pcm16_base64: bytesToBase64(pcmBytes),
-        sample_rate: MIC_TARGET_SAMPLE_RATE,
-        ts_ms: now,
-      });
-
-      if (!speechLike && state.vadSilenceFrames >= VAD_RELEASE_FRAMES) {
-        state.lastAutoCommitAtMs = now;
-        state.sawSpeech = false;
-        state.vadStreaming = false;
-        state.vadSpeechFrames = 0;
-        state.vadSilenceFrames = 0;
-        clearVADPreroll();
-        sendControl("stop");
-      }
-    };
-
-    source.connect(processor);
-    processor.connect(silentGain);
-    silentGain.connect(ctx.destination);
+    let processor = null;
+    const workletNode = await connectAudioWorkletCapture(ctx, source, silentGain);
+    if (!workletNode) {
+      processor = connectScriptProcessorCapture(ctx, source, silentGain);
+    }
+    const backend = workletNode ? "audio_worklet" : "script_processor";
 
     state.audioContext = ctx;
     state.mediaStream = stream;
     state.mediaSource = source;
     state.processor = processor;
+    state.workletNode = workletNode;
     state.silentGain = silentGain;
+    state.micCaptureBackend = backend;
     state.micActive = true;
-    logEvent("microphone started");
+    logEvent(`microphone started (${backend})`);
   } catch (err) {
     setPresence("error", "Samantha", `Mic error: ${stringifyError(err)}`);
     logError(`mic start error: ${stringifyError(err)}`);
@@ -1955,6 +2239,7 @@ async function stopMic({ sendStop }) {
   if (!state.micActive && !state.audioContext && !state.mediaStream) {
     return;
   }
+  flushQueuedMicPCM(Date.now(), true);
   state.micActive = false;
   state.micEnergyTarget = 0;
   state.bargeInActive = false;
@@ -1967,6 +2252,10 @@ async function stopMic({ sendStop }) {
   try {
     if (state.processor) {
       state.processor.disconnect();
+    }
+    if (state.workletNode) {
+      state.workletNode.port.onmessage = null;
+      state.workletNode.disconnect();
     }
     if (state.silentGain) {
       state.silentGain.disconnect();
@@ -1989,7 +2278,10 @@ async function stopMic({ sendStop }) {
     state.mediaStream = null;
     state.mediaSource = null;
     state.processor = null;
+    state.workletNode = null;
     state.silentGain = null;
+    state.micCaptureBackend = "none";
+    clearQueuedMicPCM();
   }
 
   if (state.connected) {

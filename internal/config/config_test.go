@@ -48,6 +48,9 @@ func TestLoadBackpressureAndRetentionDefaults(t *testing.T) {
 	if cfg.StrictOutbound {
 		t.Fatalf("StrictOutbound = true, want false")
 	}
+	if !cfg.UIAudioWorklet {
+		t.Fatalf("UIAudioWorklet = false, want true")
+	}
 	if cfg.WSBackpressureMode != "drop" {
 		t.Fatalf("WSBackpressureMode = %q, want %q", cfg.WSBackpressureMode, "drop")
 	}
@@ -78,6 +81,7 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	t.Setenv("APP_BIND_ADDR", ":9494")
 	t.Setenv("APP_SESSION_RETENTION", "36h")
 	t.Setenv("APP_STRICT_OUTBOUND", "true")
+	t.Setenv("APP_UI_AUDIO_WORKLET", "false")
 	t.Setenv("APP_WS_BACKPRESSURE_MODE", "block")
 	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
 
@@ -90,6 +94,9 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	}
 	if !cfg.StrictOutbound {
 		t.Fatalf("StrictOutbound = false, want true")
+	}
+	if cfg.UIAudioWorklet {
+		t.Fatalf("UIAudioWorklet = true, want false")
 	}
 	if cfg.WSBackpressureMode != "block" {
 		t.Fatalf("WSBackpressureMode = %q, want %q", cfg.WSBackpressureMode, "block")
@@ -110,6 +117,7 @@ func setCoreEnvEmpty(t *testing.T) {
 		"APP_METRICS_NAMESPACE",
 		"APP_ALLOW_ANY_ORIGIN",
 		"APP_STRICT_OUTBOUND",
+		"APP_UI_AUDIO_WORKLET",
 		"APP_WS_BACKPRESSURE_MODE",
 		"VOICE_PROVIDER",
 		"ELEVENLABS_API_KEY",

@@ -19,6 +19,7 @@ type Metrics struct {
 	ProviderErrors    *prometheus.CounterVec
 	FirstAudioLatency prometheus.Histogram
 	TurnStageLatency  *prometheus.HistogramVec
+	turnStageWindow   *turnStageWindow
 }
 
 func NewMetrics(namespace string) *Metrics {
@@ -65,6 +66,7 @@ func NewMetrics(namespace string) *Metrics {
 			Help:      "Turn-stage latency in milliseconds.",
 			Buckets:   []float64{20, 50, 100, 150, 250, 400, 700, 1200, 2000, 4000, 7000, 10000},
 		}, []string{"stage"}),
+		turnStageWindow: newTurnStageWindow(256),
 	}
 }
 
@@ -73,11 +75,20 @@ func (m *Metrics) ObserveFirstAudioLatency(d time.Duration) {
 }
 
 func (m *Metrics) ObserveTurnStage(stage string, d time.Duration) {
-	m.TurnStageLatency.WithLabelValues(stage).Observe(float64(d.Milliseconds()))
+	ms := float64(d.Milliseconds())
+	m.TurnStageLatency.WithLabelValues(stage).Observe(ms)
+	m.turnStageWindow.Observe(stage, ms)
 }
 
 func (m *Metrics) ObserveOutboundMessage(msgType, result string) {
 	m.OutboundMessages.WithLabelValues(msgType, result).Inc()
+}
+
+func (m *Metrics) SnapshotTurnStages() TurnStageSnapshot {
+	if m.turnStageWindow == nil {
+		return TurnStageSnapshot{}
+	}
+	return m.turnStageWindow.Snapshot()
 }
 
 func MetricsHandler() http.Handler {

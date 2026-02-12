@@ -597,6 +597,56 @@ select:focus,
   font-weight: 600;
 }
 
+.perf-head {
+  margin-top: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.76rem;
+  color: rgba(255, 225, 206, 0.72);
+}
+
+.perf-updated {
+  color: rgba(255, 195, 165, 0.72);
+}
+
+.perf-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.perf-card {
+  padding: 8px 9px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 198, 175, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.perf-card.is-good {
+  border-color: rgba(120, 236, 168, 0.28);
+}
+
+.perf-card.is-bad {
+  border-color: rgba(255, 150, 140, 0.3);
+}
+
+.perf-stage {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  color: rgba(255, 225, 206, 0.92);
+  margin-bottom: 4px;
+}
+
+.perf-metrics {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  color: rgba(255, 225, 206, 0.72);
+  line-height: 1.4;
+}
+
 .event-list {
   margin-top: 10px;
   max-height: 190px;
@@ -613,6 +663,12 @@ select:focus,
   border: 1px solid rgba(255, 198, 175, 0.12);
   background: rgba(255, 255, 255, 0.04);
   color: rgba(255, 236, 226, 0.66);
+}
+
+@media (max-width: 720px) {
+  .perf-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

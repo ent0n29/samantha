@@ -45,6 +45,47 @@ Upgrades to a WebSocket for streaming audio and events (see below).
 
 Returns setup checks for voice + brain providers.
 
+Response (`200`):
+```json
+{
+  "voice_provider": "local",
+  "brain_provider": "cli",
+  "ui_audio_worklet": true,
+  "checks": [
+    {
+      "id": "voice_provider",
+      "status": "ok",
+      "label": "Voice backend",
+      "detail": "local"
+    }
+  ]
+}
+```
+
+### `GET /v1/perf/latency`
+
+Returns a rolling in-memory latency snapshot (recent window) for key turn stages.
+
+Response (`200`):
+```json
+{
+  "generated_at": "2026-02-12T18:24:10.410157Z",
+  "window_size": 256,
+  "stages": [
+    {
+      "stage": "commit_to_first_audio",
+      "samples": 48,
+      "last_ms": 612,
+      "avg_ms": 544.2,
+      "p50_ms": 521,
+      "p95_ms": 812,
+      "p99_ms": 1029,
+      "target_p95_ms": 900
+    }
+  ]
+}
+```
+
 ### `GET /v1/voice/voices`
 
 Lists available voices for the configured backend.
@@ -106,4 +147,3 @@ Server sends:
 - `error_event`
 
 Message schemas live in `internal/protocol/messages.go`.
-
