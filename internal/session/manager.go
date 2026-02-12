@@ -35,6 +35,7 @@ type Manager struct {
 	sessions          map[string]*Session
 	sessionByUser     map[string]string
 	inactivityTimeout time.Duration
+	endedRetention    time.Duration
 	onExpire          func(*Session)
 }
 
@@ -46,6 +47,7 @@ func NewManager(inactivityTimeout time.Duration) *Manager {
 		sessions:          make(map[string]*Session),
 		sessionByUser:     make(map[string]string),
 		inactivityTimeout: inactivityTimeout,
+		endedRetention:    24 * time.Hour,
 	}
 }
 
@@ -53,6 +55,12 @@ func (m *Manager) SetExpireHook(hook func(*Session)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onExpire = hook
+}
+
+func (m *Manager) SetEndedRetention(retention time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.endedRetention = retention
 }
 
 func (m *Manager) Create(userID, personaID, voiceID string) *Session {
@@ -175,6 +183,12 @@ func (m *Manager) expireInactive() {
 	m.mu.Lock()
 	for _, s := range m.sessions {
 		if s.Status != StatusActive {
+			if m.endedRetention > 0 && now.Sub(s.LastActivityAt) >= m.endedRetention {
+				delete(m.sessions, s.ID)
+				if s.UserID != "" {
+					delete(m.sessionByUser, s.UserID)
+				}
+			}
 			continue
 		}
 		if now.Sub(s.LastActivityAt) < m.inactivityTimeout {

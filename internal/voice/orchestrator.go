@@ -34,18 +34,20 @@ type PersonaProfile struct {
 }
 
 type Orchestrator struct {
-	sessions      *session.Manager
-	adapter       openclaw.Adapter
-	memoryStore   memory.Store
-	sttProvider   STTProvider
-	ttsProvider   TTSProvider
-	metrics       *observability.Metrics
-	firstAudioSLO time.Duration
-	defaultVoice  string
-	defaultModel  string
-	sttLabel      string
-	ttsLabel      string
-	profiles      map[string]PersonaProfile
+	sessions       *session.Manager
+	adapter        openclaw.Adapter
+	memoryStore    memory.Store
+	sttProvider    STTProvider
+	ttsProvider    TTSProvider
+	metrics        *observability.Metrics
+	firstAudioSLO  time.Duration
+	defaultVoice   string
+	defaultModel   string
+	sttLabel       string
+	ttsLabel       string
+	profiles       map[string]PersonaProfile
+	strictOutbound bool
+	outboundMode   string
 }
 
 func NewOrchestrator(
@@ -59,6 +61,8 @@ func NewOrchestrator(
 	defaultVoice string,
 	defaultModel string,
 	voiceProvider string,
+	strictOutbound bool,
+	outboundMode string,
 ) *Orchestrator {
 	vp := strings.ToLower(strings.TrimSpace(voiceProvider))
 	if vp == "" {
@@ -97,19 +101,29 @@ func NewOrchestrator(
 		},
 	}
 
+	mode := strings.ToLower(strings.TrimSpace(outboundMode))
+	if mode == "" {
+		mode = "drop"
+	}
+	if mode != "drop" && mode != "block" {
+		mode = "drop"
+	}
+
 	return &Orchestrator{
-		sessions:      sessions,
-		adapter:       adapter,
-		memoryStore:   memoryStore,
-		sttProvider:   sttProvider,
-		ttsProvider:   ttsProvider,
-		metrics:       metrics,
-		firstAudioSLO: firstAudioSLO,
-		defaultVoice:  defaultVoice,
-		defaultModel:  defaultModel,
-		sttLabel:      vp + "_stt",
-		ttsLabel:      vp + "_tts",
-		profiles:      profiles,
+		sessions:       sessions,
+		adapter:        adapter,
+		memoryStore:    memoryStore,
+		sttProvider:    sttProvider,
+		ttsProvider:    ttsProvider,
+		metrics:        metrics,
+		firstAudioSLO:  firstAudioSLO,
+		defaultVoice:   defaultVoice,
+		defaultModel:   defaultModel,
+		sttLabel:       vp + "_stt",
+		ttsLabel:       vp + "_tts",
+		profiles:       profiles,
+		strictOutbound: strictOutbound,
+		outboundMode:   mode,
 	}
 }
 
@@ -379,6 +393,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				}
 
 				turnID := uuid.NewString()
+				committedAt := time.Now()
 				_ = o.sessions.StartTurn(s.ID, turnID)
 				turnCtx, cancel := context.WithCancel(ctx)
 
@@ -390,7 +405,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				activeToken = token
 				turnMu.Unlock()
 
-				go func(turnText, turnID string, token int64) {
+				go func(turnText, turnID string, token int64, committedAt time.Time) {
 					defer func() {
 						turnMu.Lock()
 						if activeToken == token {
@@ -401,7 +416,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 						turnMu.Unlock()
 					}()
 
-					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, outbound); err != nil {
+					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, committedAt, outbound); err != nil {
 						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 							return
 						}
@@ -414,7 +429,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							Detail:    err.Error(),
 						})
 					}
-				}(committedText, turnID, token)
+				}(committedText, turnID, token, committedAt)
 			case STTEventError:
 				if evt.Code == "commit_throttled" {
 					// Non-fatal: happens when commit is requested with too little uncommitted audio.
@@ -434,7 +449,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 	}
 }
 
-func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, userText, turnID string, outbound chan<- any) error {
+func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, userText, turnID string, committedAt time.Time, outbound chan<- any) error {
 	start := time.Now()
 	profile := o.profileForSession(s)
 
@@ -463,6 +478,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	defer ttsStream.Close()
 
 	firstAudioObserved := false
+	firstTextObserved := false
 	ttsDone := make(chan struct{})
 	go func() {
 		defer close(ttsDone)
@@ -481,6 +497,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 				case TTSEventAudio:
 					if !firstAudioObserved {
 						firstAudioObserved = true
+						o.metrics.ObserveTurnStage("commit_to_first_audio", time.Since(committedAt))
 						o.metrics.ObserveFirstAudioLatency(time.Since(start))
 					}
 					seq++
@@ -519,6 +536,10 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		PersonaID:     profile.ID,
 	}, func(delta string) error {
 		assistantOut += delta
+		if !firstTextObserved && strings.TrimSpace(delta) != "" {
+			firstTextObserved = true
+			o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
+		}
 		o.send(outbound, protocol.AssistantTextDelta{
 			Type:      protocol.TypeAssistantTextDelta,
 			SessionID: s.ID,
@@ -534,6 +555,16 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	if assistantOut == "" {
 		assistantOut = res.Text
 		if assistantOut != "" {
+			if !firstTextObserved && strings.TrimSpace(assistantOut) != "" {
+				firstTextObserved = true
+				o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
+			}
+			o.send(outbound, protocol.AssistantTextDelta{
+				Type:      protocol.TypeAssistantTextDelta,
+				SessionID: s.ID,
+				TurnID:    turnID,
+				TextDelta: assistantOut,
+			})
 			_ = ttsStream.SendText(ctx, assistantOut, true)
 		}
 	}
@@ -571,6 +602,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 			o.metrics.SessionEvents.WithLabelValues("first_audio_slo_miss").Inc()
 		}
 	}
+	o.metrics.ObserveTurnStage("turn_total", time.Since(committedAt))
 
 	return nil
 }
@@ -628,10 +660,81 @@ func (o *Orchestrator) profileForPersona(personaID string) PersonaProfile {
 }
 
 func (o *Orchestrator) send(outbound chan<- any, msg any) {
+	msgType, critical := outboundMessageMeta(msg)
+	record := func(result string) {
+		o.metrics.ObserveOutboundMessage(msgType, result)
+	}
+
+	if !o.strictOutbound {
+		select {
+		case outbound <- msg:
+			record("delivered")
+		default:
+			record("dropped")
+			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
+		}
+		return
+	}
+
+	sendWithTimeout := func(timeout time.Duration, timeoutEvent string) bool {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case outbound <- msg:
+			record("delivered")
+			return true
+		case <-timer.C:
+			record("timeout")
+			if timeoutEvent != "" {
+				o.metrics.SessionEvents.WithLabelValues(timeoutEvent).Inc()
+			}
+			return false
+		}
+	}
+
+	criticalTimeout := 600 * time.Millisecond
+	if critical {
+		if !sendWithTimeout(criticalTimeout, "outbound_timeout_critical") {
+			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
+		}
+		return
+	}
+
+	if o.outboundMode == "block" {
+		if !sendWithTimeout(120*time.Millisecond, "outbound_timeout") {
+			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
+		}
+		return
+	}
+
+	// Strict+drop: drop low-priority bursts, but never critical events above.
 	select {
 	case outbound <- msg:
+		record("delivered")
 	default:
+		record("dropped")
 		o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
+	}
+}
+
+func outboundMessageMeta(msg any) (msgType string, critical bool) {
+	switch m := msg.(type) {
+	case protocol.AssistantTurnEnd:
+		return string(m.Type), true
+	case protocol.ErrorEvent:
+		return string(m.Type), true
+	case protocol.SystemEvent:
+		return string(m.Type), true
+	case protocol.AssistantAudioChunk:
+		return string(m.Type), false
+	case protocol.AssistantTextDelta:
+		return string(m.Type), false
+	case protocol.STTPartial:
+		return string(m.Type), false
+	case protocol.STTCommitted:
+		return string(m.Type), false
+	default:
+		return "unknown", false
 	}
 }
 

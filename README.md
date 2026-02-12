@@ -26,8 +26,11 @@ Open:
 Copy `.env.example` to `.env` and tweak as needed. Key vars:
 
 - `VOICE_PROVIDER=auto|local|elevenlabs|mock`
+- `APP_SESSION_RETENTION` (ended-session retention window before pruning)
+- `APP_STRICT_OUTBOUND` + `APP_WS_BACKPRESSURE_MODE=drop|block`
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
 - `OPENCLAW_HTTP_URL` (when using `http`)
+- `OPENCLAW_HTTP_STREAM_STRICT` (strict streamed JSON validation for OpenClaw HTTP adapter)
 - `OPENCLAW_AGENT_ID` (OpenClaw agent id; default `samantha` in `make dev`)
 - `OPENCLAW_WORKSPACE_DIR` (per-user OpenClaw workspace; defaults to `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID`)
 - `OPENCLAW_CLI_PATH` (when using `cli` or `auto`)

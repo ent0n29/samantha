@@ -13,10 +13,14 @@ type Config struct {
 	BindAddr                 string
 	ShutdownTimeout          time.Duration
 	SessionInactivityTimeout time.Duration
+	SessionRetention         time.Duration
 	FirstAudioSLO            time.Duration
 	MetricsNamespace         string
 
 	AllowAnyOrigin bool
+	StrictOutbound bool
+
+	WSBackpressureMode string
 
 	VoiceProvider string
 
@@ -40,9 +44,10 @@ type Config struct {
 	LocalKokoroVoice        string
 	LocalKokoroLangCode     string
 
-	OpenClawAdapterMode string
-	OpenClawHTTPURL     string
-	OpenClawCLIPath     string
+	OpenClawAdapterMode      string
+	OpenClawHTTPURL          string
+	OpenClawCLIPath          string
+	OpenClawHTTPStreamStrict bool
 
 	DatabaseURL        string
 	MemoryEmbeddingDim int
@@ -84,7 +89,11 @@ func Load() (Config, error) {
 		MemoryEmbeddingDim:       1536,
 		ShutdownTimeout:          15 * time.Second,
 		SessionInactivityTimeout: 2 * time.Minute,
+		SessionRetention:         24 * time.Hour,
 		FirstAudioSLO:            700 * time.Millisecond,
+		StrictOutbound:           false,
+		WSBackpressureMode:       envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
+		OpenClawHTTPStreamStrict: false,
 	}
 	var err error
 	cfg.ShutdownTimeout, err = durationFromEnv("APP_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout)
@@ -92,6 +101,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.SessionInactivityTimeout, err = durationFromEnv("APP_SESSION_INACTIVITY_TIMEOUT", cfg.SessionInactivityTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.SessionRetention, err = durationFromEnv("APP_SESSION_RETENTION", cfg.SessionRetention)
 	if err != nil {
 		return Config{}, err
 	}
@@ -104,6 +117,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.AllowAnyOrigin, err = boolFromEnv("APP_ALLOW_ANY_ORIGIN", cfg.AllowAnyOrigin)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.StrictOutbound, err = boolFromEnv("APP_STRICT_OUTBOUND", cfg.StrictOutbound)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.OpenClawHTTPStreamStrict, err = boolFromEnv("OPENCLAW_HTTP_STREAM_STRICT", cfg.OpenClawHTTPStreamStrict)
 	if err != nil {
 		return Config{}, err
 	}
@@ -123,6 +144,16 @@ func Load() (Config, error) {
 
 	if cfg.SessionInactivityTimeout < 5*time.Second {
 		return Config{}, fmt.Errorf("APP_SESSION_INACTIVITY_TIMEOUT must be at least 5s")
+	}
+	if cfg.SessionRetention < 0 {
+		return Config{}, fmt.Errorf("APP_SESSION_RETENTION must be >= 0")
+	}
+	cfg.WSBackpressureMode = strings.ToLower(trimSpace(cfg.WSBackpressureMode))
+	if cfg.WSBackpressureMode == "" {
+		cfg.WSBackpressureMode = "drop"
+	}
+	if cfg.WSBackpressureMode != "drop" && cfg.WSBackpressureMode != "block" {
+		return Config{}, fmt.Errorf("APP_WS_BACKPRESSURE_MODE must be one of: drop|block")
 	}
 	if cfg.MemoryEmbeddingDim <= 0 {
 		return Config{}, fmt.Errorf("MEMORY_EMBEDDING_DIM must be positive")

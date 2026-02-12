@@ -1,6 +1,10 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	setCoreEnvEmpty(t)
@@ -33,15 +37,80 @@ func TestLoadUsesExplicitOpenClawHTTPURL(t *testing.T) {
 	}
 }
 
+func TestLoadBackpressureAndRetentionDefaults(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9292")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.StrictOutbound {
+		t.Fatalf("StrictOutbound = true, want false")
+	}
+	if cfg.WSBackpressureMode != "drop" {
+		t.Fatalf("WSBackpressureMode = %q, want %q", cfg.WSBackpressureMode, "drop")
+	}
+	if cfg.SessionRetention != 24*time.Hour {
+		t.Fatalf("SessionRetention = %s, want 24h", cfg.SessionRetention)
+	}
+	if cfg.OpenClawHTTPStreamStrict {
+		t.Fatalf("OpenClawHTTPStreamStrict = true, want false")
+	}
+}
+
+func TestLoadRejectsInvalidBackpressureMode(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9393")
+	t.Setenv("APP_WS_BACKPRESSURE_MODE", "foo")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid APP_WS_BACKPRESSURE_MODE")
+	}
+	if !strings.Contains(err.Error(), "APP_WS_BACKPRESSURE_MODE") {
+		t.Fatalf("Load() error = %v, want backpressure mode parse/validation error", err)
+	}
+}
+
+func TestLoadParsesSessionRetention(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9494")
+	t.Setenv("APP_SESSION_RETENTION", "36h")
+	t.Setenv("APP_STRICT_OUTBOUND", "true")
+	t.Setenv("APP_WS_BACKPRESSURE_MODE", "block")
+	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.SessionRetention != 36*time.Hour {
+		t.Fatalf("SessionRetention = %s, want 36h", cfg.SessionRetention)
+	}
+	if !cfg.StrictOutbound {
+		t.Fatalf("StrictOutbound = false, want true")
+	}
+	if cfg.WSBackpressureMode != "block" {
+		t.Fatalf("WSBackpressureMode = %q, want %q", cfg.WSBackpressureMode, "block")
+	}
+	if !cfg.OpenClawHTTPStreamStrict {
+		t.Fatalf("OpenClawHTTPStreamStrict = false, want true")
+	}
+}
+
 func setCoreEnvEmpty(t *testing.T) {
 	t.Helper()
 	keys := []string{
 		"APP_BIND_ADDR",
 		"APP_SHUTDOWN_TIMEOUT",
 		"APP_SESSION_INACTIVITY_TIMEOUT",
+		"APP_SESSION_RETENTION",
 		"APP_FIRST_AUDIO_SLO",
 		"APP_METRICS_NAMESPACE",
 		"APP_ALLOW_ANY_ORIGIN",
+		"APP_STRICT_OUTBOUND",
+		"APP_WS_BACKPRESSURE_MODE",
 		"VOICE_PROVIDER",
 		"ELEVENLABS_API_KEY",
 		"ELEVENLABS_WS_BASE_URL",
@@ -63,6 +132,7 @@ func setCoreEnvEmpty(t *testing.T) {
 		"OPENCLAW_ADAPTER_MODE",
 		"OPENCLAW_HTTP_URL",
 		"OPENCLAW_CLI_PATH",
+		"OPENCLAW_HTTP_STREAM_STRICT",
 		"DATABASE_URL",
 		"MEMORY_EMBEDDING_DIM",
 	}

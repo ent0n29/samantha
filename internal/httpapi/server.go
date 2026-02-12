@@ -201,8 +201,13 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 			select {
 			case <-ctx.Done():
 				return
-			case msg := <-outbound:
+			case msg, ok := <-outbound:
+				if !ok {
+					return
+				}
+				_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 				if err := conn.WriteJSON(msg); err != nil {
+					s.metrics.WSWriteErrors.WithLabelValues("write_json").Inc()
 					cancel()
 					return
 				}
@@ -221,6 +226,7 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
+readLoop:
 	for {
 		msgType, data, err := conn.ReadMessage()
 		if err != nil {
@@ -247,7 +253,7 @@ func (s *Server) handleSessionWS(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-ctx.Done():
-			break
+			break readLoop
 		case inbound <- parsed:
 		}
 	}

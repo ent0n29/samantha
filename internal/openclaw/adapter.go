@@ -33,9 +33,10 @@ type Adapter interface {
 
 // Config controls adapter construction.
 type Config struct {
-	Mode    string
-	HTTPURL string
-	CLIPath string
+	Mode             string
+	HTTPURL          string
+	CLIPath          string
+	HTTPStreamStrict bool
 }
 
 func NewAdapter(cfg Config) (Adapter, error) {
@@ -56,7 +57,7 @@ func NewAdapter(cfg Config) (Adapter, error) {
 		if strings.TrimSpace(cfg.HTTPURL) == "" {
 			return nil, errors.New("openclaw HTTP url is required for http mode")
 		}
-		return NewHTTPAdapter(cfg.HTTPURL), nil
+		return NewHTTPAdapterWithOptions(cfg.HTTPURL, cfg.HTTPStreamStrict), nil
 	case "mock":
 		return NewMockAdapter(), nil
 	default:
@@ -76,7 +77,7 @@ func newAutoAdapter(cfg Config) Adapter {
 
 	httpURL := strings.TrimSpace(cfg.HTTPURL)
 	if httpURL != "" {
-		return NewHTTPAdapter(httpURL)
+		return NewHTTPAdapterWithOptions(httpURL, cfg.HTTPStreamStrict)
 	}
 
 	return NewMockAdapter()

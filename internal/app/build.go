@@ -42,9 +42,10 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 	}
 
 	adapter, err := openclaw.NewAdapter(openclaw.Config{
-		Mode:    cfg.OpenClawAdapterMode,
-		HTTPURL: cfg.OpenClawHTTPURL,
-		CLIPath: cfg.OpenClawCLIPath,
+		Mode:             cfg.OpenClawAdapterMode,
+		HTTPURL:          cfg.OpenClawHTTPURL,
+		CLIPath:          cfg.OpenClawCLIPath,
+		HTTPStreamStrict: cfg.OpenClawHTTPStreamStrict,
 	})
 	if err != nil {
 		_ = memoryStore.Close()
@@ -61,6 +62,7 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 	cfg.VoiceProvider = voiceSetup.resolvedProvider
 
 	sessions := session.NewManager(cfg.SessionInactivityTimeout)
+	sessions.SetEndedRetention(cfg.SessionRetention)
 	sessions.SetExpireHook(func(_ *session.Session) {
 		metrics.SessionEvents.WithLabelValues("expired").Inc()
 		metrics.ActiveSessions.Set(float64(sessions.ActiveCount()))
@@ -77,6 +79,8 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		voiceSetup.defaultVoiceID,
 		voiceSetup.defaultModelID,
 		cfg.VoiceProvider,
+		cfg.StrictOutbound,
+		cfg.WSBackpressureMode,
 	)
 
 	api := httpapi.New(cfg, sessions, orchestrator, metrics)
