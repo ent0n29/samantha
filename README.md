@@ -156,5 +156,6 @@ If `openclaw` is not installed/configured, the server runs with a mock brain.
   - `make perf-latency-local`
   - or `FAIL_ON_TARGETS=1 SAMPLES=30 ./scripts/perf_latency_local_baseline.sh http://127.0.0.1:8080`
   - optionally enforce provider check: `REQUIRE_LOCAL_PROVIDER=1 ...`
-  - the script now requires measured samples by default (`REQUIRE_SAMPLES=1`), so speak through a few full turns while it runs
+  - default guardrails: `REQUIRE_SAMPLES=1`, `MIN_STAGE_SAMPLES=5`, `FAIL_EARLY=0`
+  - speak through a few full turns while it runs (so stages move past warming)
   - default targets: `first_text p95<=550ms`, `first_audio p95<=1400ms`, `turn_total p95<=3200ms`
