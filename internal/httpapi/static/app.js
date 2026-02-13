@@ -32,6 +32,12 @@ const VAD_SHORT_UTTERANCE_MS = 1500;
 const VAD_AUTO_COMMIT_SILENCE_MS = 430;
 const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 320;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 900;
+const THINKING_CUE_DELAY_MS = 140;
+const THINKING_CUE_MIN_INTERVAL_MS = 2600;
+const THINKING_CUE_DURATION_SEC = 0.12;
+const THINKING_CUE_GAIN = 0.045;
+const THINKING_CUE_FREQ_START_HZ = 690;
+const THINKING_CUE_FREQ_END_HZ = 560;
 
 const state = {
   sessionId: "",
@@ -72,6 +78,8 @@ const state = {
   lastTurnID: "",
 
   captionClearTimer: null,
+  thinkingCueTimer: null,
+  lastThinkingCueAtMs: 0,
 
   longPressTimer: null,
   longPressFired: false,
@@ -2600,7 +2608,7 @@ function handleServerMessage(raw) {
       clearBargePreroll();
       state.awakeUntilMs = 0;
       state.manualArmUntilMs = 0;
-      setPresence("thinking", "…", "");
+      setPresence("thinking", "", "");
       setCaption("", msg.text || "", { clearAfterMs: 1200 });
       break;
     case "system_event":
@@ -2613,7 +2621,7 @@ function handleServerMessage(raw) {
       if (state.ignoredTurns && state.ignoredTurns.has(msg.turn_id || "")) {
         break;
       }
-      setPresence("thinking", "…", "");
+      setPresence("thinking", "", "");
       handleAssistantDelta(msg);
       break;
     case "assistant_audio_chunk":
@@ -2664,7 +2672,8 @@ function handleSystemEvent(msg) {
       logEvent("wake word detected");
       break;
     case "assistant_working":
-      setPresence("thinking", "…", "");
+      setPresence("thinking", "", "");
+      scheduleThinkingCue();
       logEvent("assistant working");
       break;
     default:
@@ -3716,6 +3725,10 @@ function setPresence(mode, primary, secondary) {
   const normalized = mode || "disconnected";
   state.presence = normalized;
 
+  if (normalized !== "thinking") {
+    clearThinkingCueTimer();
+  }
+
   el.pulse.classList.remove(
     "state-disconnected",
     "state-connected",
@@ -3729,6 +3742,71 @@ function setPresence(mode, primary, secondary) {
   const primaryLine = primary ?? presencePrimary(normalized);
   const secondaryLine = secondary ?? "";
   setCaption(primaryLine, secondaryLine, { clearAfterMs: normalized === "connected" ? 2600 : 0 });
+}
+
+function clearThinkingCueTimer() {
+  if (!state.thinkingCueTimer) {
+    return;
+  }
+  clearTimeout(state.thinkingCueTimer);
+  state.thinkingCueTimer = null;
+}
+
+function scheduleThinkingCue() {
+  clearThinkingCueTimer();
+  state.thinkingCueTimer = setTimeout(() => {
+    state.thinkingCueTimer = null;
+    void playThinkingCue();
+  }, THINKING_CUE_DELAY_MS);
+}
+
+async function playThinkingCue() {
+  if (state.presence !== "thinking" || !state.connected) {
+    return;
+  }
+  const now = Date.now();
+  if (now - state.lastThinkingCueAtMs < THINKING_CUE_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  let ctx;
+  try {
+    ctx = await ensurePlaybackContext();
+  } catch (_err) {
+    return;
+  }
+  if (!ctx || state.presence !== "thinking") {
+    return;
+  }
+  if (state.playbackContext !== ctx || !state.playbackGain) {
+    return;
+  }
+
+  const t0 = Math.max(ctx.currentTime, state.playbackNextTime || 0);
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(THINKING_CUE_FREQ_START_HZ, t0);
+  osc.frequency.exponentialRampToValueAtTime(THINKING_CUE_FREQ_END_HZ, t0 + THINKING_CUE_DURATION_SEC);
+
+  gain.gain.setValueAtTime(0.0001, t0);
+  gain.gain.exponentialRampToValueAtTime(THINKING_CUE_GAIN, t0 + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t0 + THINKING_CUE_DURATION_SEC);
+
+  osc.connect(gain);
+  gain.connect(state.playbackGain);
+  osc.start(t0);
+  osc.stop(t0 + THINKING_CUE_DURATION_SEC + 0.01);
+  osc.onended = () => {
+    try {
+      osc.disconnect();
+      gain.disconnect();
+    } catch (_err) {
+      // ignore
+    }
+  };
+  state.lastThinkingCueAtMs = Date.now();
 }
 
 function setCaption(primary, secondary, { clearAfterMs }) {
@@ -3769,8 +3847,8 @@ function presencePrimary(mode) {
     disconnected: "Samantha",
     connected: "Samantha",
     listening: "I’m listening.",
-    thinking: "Thinking…",
-    speaking: "…",
+    thinking: "",
+    speaking: "",
     error: "Something went wrong.",
   };
   return lines[mode] || lines.connected;

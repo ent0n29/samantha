@@ -11,6 +11,15 @@ func TestLeadResponseFilterStripsSingleChunkFillerPrefix(t *testing.T) {
 	}
 }
 
+func TestLeadResponseFilterStripsSecVariant(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("One sec while I think. We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
 func TestLeadResponseFilterStripsSplitFillerPrefix(t *testing.T) {
 	f := newLeadResponseFilter()
 	if got := f.Consume("Give me a sec"); got != "" {
@@ -20,7 +29,7 @@ func TestLeadResponseFilterStripsSplitFillerPrefix(t *testing.T) {
 		t.Fatalf("Consume(part2) = %q, want empty", got)
 	}
 	got := f.Consume(" Let's do it.")
-	want := " Let's do it."
+	want := "Let's do it."
 	if got != want {
 		t.Fatalf("Consume(part3) = %q, want %q", got, want)
 	}
@@ -37,10 +46,10 @@ func TestLeadResponseFilterKeepsNonFillerText(t *testing.T) {
 
 func TestLeadResponseFilterFinalizeUsesFallbackWhenStreamSilent(t *testing.T) {
 	f := newLeadResponseFilter()
-	if got := f.Consume("Give me a second."); got != "" {
+	if got := f.Consume("Give me just a second to think."); got != "" {
 		t.Fatalf("Consume() = %q, want empty", got)
 	}
-	got := f.Finalize("Give me a second. Here is the answer.")
+	got := f.Finalize("Give me just a second to think. Here is the answer.")
 	want := "Here is the answer."
 	if got != want {
 		t.Fatalf("Finalize() = %q, want %q", got, want)

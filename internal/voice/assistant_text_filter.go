@@ -11,8 +11,12 @@ const leadFillerProbeMaxCanonicalLen = 96
 var (
 	assistantLeadFillerPhrases = []string{
 		"give me a second while i think",
+		"give me a second to think",
 		"give me a second",
 		"give me just a second",
+		"give me just a second to think",
+		"just a sec",
+		"one sec",
 		"just a second",
 		"one second",
 		"give me a moment",
@@ -21,10 +25,12 @@ var (
 		"one moment",
 		"hold on",
 		"hang on",
+		"let me think for a second",
+		"let me think for a moment",
 		"let me think",
 		"while i think",
 	}
-	assistantLeadFillerRe = regexp.MustCompile(`(?is)^\s*(?:give me(?: just)? a second(?: while i think)?|just a second|one second|give me(?: just)? a moment|just a moment|one moment|hold on|hang on|let me think|while i think)(?:(?:\s*[.!?,:;\-]+\s*)+|\s+$|$)`)
+	assistantLeadFillerRe = regexp.MustCompile(`(?is)^\s*(?:give me(?: just)? a (?:second|sec)(?: while i think| to think)?|just a (?:second|sec)|one (?:second|sec)(?: while i think)?|give me(?: just)? a moment(?: while i think| to think)?|just a moment|one moment|hold on|hang on|let me think(?: for a (?:second|moment))?|while i think)(?:(?:\s*[.!?,:;\-]+\s*)+|\s+$|$)`)
 )
 
 type leadResponseFilter struct {
@@ -45,9 +51,13 @@ func (f *leadResponseFilter) Consume(delta string) string {
 	}
 
 	f.buffer += delta
-	f.buffer = stripAssistantLeadFiller(f.buffer)
-
 	canon := canonicalizeForLeadFiller(f.buffer)
+	if isAssistantLeadFillerPrefix(canon) && len(canon) < leadFillerProbeMaxCanonicalLen {
+		return ""
+	}
+
+	f.buffer = stripAssistantLeadFiller(f.buffer)
+	canon = canonicalizeForLeadFiller(f.buffer)
 	if canon == "" {
 		return ""
 	}

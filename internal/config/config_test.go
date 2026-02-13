@@ -30,8 +30,8 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if !cfg.OpenClawCLIStreaming {
 		t.Fatalf("OpenClawCLIStreaming = false, want true")
 	}
-	if cfg.OpenClawCLIStreamMinChars != 24 {
-		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 24)
+	if cfg.OpenClawCLIStreamMinChars != 16 {
+		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 16)
 	}
 }
 
