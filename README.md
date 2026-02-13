@@ -25,6 +25,54 @@ If OpenClaw isn't configured, it falls back to a deterministic mock "brain" so y
 See `docs/ARCHITECTURE.md` for the component map and data flow.
 API reference: `docs/API.md`.
 
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph Client["Browser UI (/ui/)"]
+    Mic["Mic capture"]
+    UX["Captions + audio playback"]
+  end
+
+  subgraph Server["Samantha server (:8080)"]
+    API["HTTP + WebSocket API"]
+    Orch["Voice orchestrator"]
+    Sess["Session lifecycle"]
+    Task["Task runtime"]
+  end
+
+  subgraph Voice["Voice providers"]
+    STT["STT (local / ElevenLabs / mock)"]
+    TTS["TTS (local / ElevenLabs / mock)"]
+  end
+
+  subgraph Brain["OpenClaw brain"]
+    Adapter["Adapter (auto / cli / http / mock)"]
+    Agent["Agent workspace"]
+  end
+
+  subgraph Storage["Memory + persistence"]
+    Mem["In-memory store"]
+    PG[("Postgres (optional)")]
+  end
+
+  Mic -->|"16kHz PCM chunks"| API
+  API --> Orch
+  Orch --> STT
+  STT -->|"partial + committed transcripts"| Orch
+  Orch --> Adapter
+  Adapter --> Agent
+  Adapter -->|"response deltas"| Orch
+  Orch --> TTS
+  TTS -->|"audio stream"| API
+  API --> UX
+  Orch --> Sess
+  Orch --> Mem
+  Orch --> Task
+  Mem -. "when DATABASE_URL" .-> PG
+  Task -. "task snapshots" .-> PG
+```
+
 ## Quickstart (macOS)
 
 ```bash
