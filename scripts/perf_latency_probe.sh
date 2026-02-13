@@ -8,12 +8,15 @@ TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS:-400}"
 TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS:-900}"
 TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS:-3500}"
 FAIL_ON_TARGETS="${FAIL_ON_TARGETS:-0}"
+REQUIRE_SAMPLES="${REQUIRE_SAMPLES:-0}"
 
 count=0
+seen_samples=0
 
 echo "Latency probe -> ${BASE_URL}/v1/perf/latency (interval=${INTERVAL_SEC}s samples=${SAMPLES:-0})"
 echo "Targets: first_text_p95<=${TARGET_FIRST_TEXT_P95_MS}ms first_audio_p95<=${TARGET_FIRST_AUDIO_P95_MS}ms turn_total_p95<=${TARGET_TURN_TOTAL_P95_MS}ms"
 echo "Fail on target breach: ${FAIL_ON_TARGETS}"
+echo "Require measured samples: ${REQUIRE_SAMPLES}"
 
 while true; do
   now="$(date '+%H:%M:%S')"
@@ -21,6 +24,30 @@ while true; do
   if [[ -z "${json}" ]]; then
     echo "[${now}] fetch failed"
   else
+    has_samples="$(JSON_PAYLOAD="${json}" python3 - <<'PY'
+import json, os
+try:
+    payload = json.loads(os.environ.get("JSON_PAYLOAD", "{}"))
+except Exception:
+    print("0")
+    raise SystemExit(0)
+
+found = False
+for item in payload.get("stages", []):
+    try:
+        n = int(item.get("samples", 0) or 0)
+    except Exception:
+        n = 0
+    if n > 0:
+        found = True
+        break
+print("1" if found else "0")
+PY
+)"
+    if [[ "${has_samples}" == "1" ]]; then
+      seen_samples=1
+    fi
+
     JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$now" "$FAIL_ON_TARGETS" <<'PY'
 import json
 import os
@@ -79,3 +106,9 @@ PY
   fi
   sleep "${INTERVAL_SEC}"
 done
+
+if [[ "${REQUIRE_SAMPLES}" == "1" && "${seen_samples}" -eq 0 ]]; then
+  echo "No measured latency samples were observed."
+  echo "Speak to Samantha during the probe (at least a few complete turns), then rerun."
+  exit 3
+fi

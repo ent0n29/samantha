@@ -11,9 +11,11 @@ TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS:-1400}"
 TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS:-3200}"
 FAIL_ON_TARGETS="${FAIL_ON_TARGETS:-1}"
 REQUIRE_LOCAL_PROVIDER="${REQUIRE_LOCAL_PROVIDER:-0}"
+REQUIRE_SAMPLES="${REQUIRE_SAMPLES:-1}"
 
 echo "Local-first latency baseline (VOICE_PROVIDER=local expected)"
-echo "interval=${INTERVAL_SEC}s samples=${SAMPLES} fail_on_targets=${FAIL_ON_TARGETS}"
+echo "interval=${INTERVAL_SEC}s samples=${SAMPLES} fail_on_targets=${FAIL_ON_TARGETS} require_samples=${REQUIRE_SAMPLES}"
+echo "Tip: talk to Samantha while this runs so latency stages are populated."
 
 onboarding_json="$(curl -fsS "${BASE_URL%/}/v1/onboarding/status" || true)"
 if [[ -n "${onboarding_json}" ]]; then
@@ -42,4 +44,5 @@ TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS}" \
 TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS}" \
 TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS}" \
 FAIL_ON_TARGETS="${FAIL_ON_TARGETS}" \
+REQUIRE_SAMPLES="${REQUIRE_SAMPLES}" \
   "${ROOT}/scripts/perf_latency_probe.sh" "${BASE_URL}"
