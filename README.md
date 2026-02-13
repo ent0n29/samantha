@@ -21,6 +21,15 @@ API reference: `docs/API.md`.
 ## Architecture
 
 ```mermaid
+%%{init: {
+  "theme": "base",
+  "themeVariables": {
+    "background": "transparent",
+    "lineColor": "#4b6b8f",
+    "primaryTextColor": "#d7e6f5",
+    "fontFamily": "ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
+  }
+}}%%
 flowchart LR
   subgraph Client["Browser UI (/ui/)"]
     Mic["Mic capture"]
@@ -64,6 +73,19 @@ flowchart LR
   Orch --> Task
   Mem -. "when DATABASE_URL" .-> PG
   Task -. "task snapshots" .-> PG
+
+  classDef node fill:#111c2e,stroke:#5ea6ff,color:#eef6ff,stroke-width:1px;
+  classDef store fill:#12263a,stroke:#67e8f9,color:#e6fbff,stroke-width:1px;
+  class Mic,UX,API,Orch,Sess,Task,STT,TTS,Adapter,Agent node;
+  class Mem,PG store;
+
+  style Client fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+  style Server fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+  style Voice fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+  style Brain fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+  style Storage fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+
+  linkStyle default stroke:#4b6b8f,stroke-width:1.2px,color:#c7d7e8;
 ```
 
 ## Quickstart (macOS)
@@ -96,7 +118,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `OPENCLAW_CLI_PATH` (when using `cli` or `auto`)
 - `OPENCLAW_CLI_THINKING=minimal|low|medium|high` (lower is faster first response; default `low`)
 - `OPENCLAW_CLI_STREAMING=true|false` (feature-flag incremental CLI text streaming; default `true`)
-- `OPENCLAW_CLI_STREAM_MIN_CHARS` (chunking threshold for incremental CLI streaming; default `24`)
+- `OPENCLAW_CLI_STREAM_MIN_CHARS` (chunking threshold for incremental CLI streaming; default `16`)
 - `DATABASE_URL` (optional; enables Postgres-backed memory)
   - Also persists task runtime state (`tasks`, `task_steps`) when task runtime is enabled.
 
