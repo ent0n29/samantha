@@ -92,6 +92,7 @@ func (s *Server) Router() http.Handler {
 	r.Get("/v1/onboarding/status", s.handleOnboardingStatus)
 	r.Get("/v1/ui/settings", s.handleUISettings)
 	r.Get("/v1/perf/latency", s.handlePerfLatency)
+	r.Post("/v1/perf/latency/reset", s.handlePerfLatencyReset)
 	r.Get("/v1/voice/voices", s.handleListVoices)
 	r.Post("/v1/voice/tts/preview", s.handlePreviewTTS)
 	r.Post("/v1/tasks", s.handleCreateTask)

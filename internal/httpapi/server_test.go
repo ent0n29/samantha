@@ -226,6 +226,50 @@ func TestPerfLatencySnapshot(t *testing.T) {
 	}
 }
 
+func TestPerfLatencyReset(t *testing.T) {
+	cfg := config.Config{
+		SessionInactivityTimeout: 2 * time.Minute,
+	}
+	sessions := session.NewManager(cfg.SessionInactivityTimeout)
+	metrics := observability.NewMetrics("test_httpapi_perf_reset_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
+	metrics.ObserveTurnStage("commit_to_first_text", 320*time.Millisecond)
+	metrics.ObserveTurnStage("commit_to_first_audio", 780*time.Millisecond)
+
+	srv := New(cfg, sessions, nil, metrics, nil)
+	router := srv.Router()
+
+	before := doRequest(t, router, http.MethodGet, "/v1/perf/latency", "", nil)
+	if before.Code != http.StatusOK {
+		t.Fatalf("before status = %d, want %d", before.Code, http.StatusOK)
+	}
+	var beforePayload map[string]any
+	if err := json.Unmarshal(before.Body.Bytes(), &beforePayload); err != nil {
+		t.Fatalf("decode before response: %v", err)
+	}
+	beforeStages, _ := beforePayload["stages"].([]any)
+	if len(beforeStages) == 0 {
+		t.Fatalf("before stages empty, want populated")
+	}
+
+	reset := doRequest(t, router, http.MethodPost, "/v1/perf/latency/reset", "", nil)
+	if reset.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, want %d", reset.Code, http.StatusOK)
+	}
+
+	after := doRequest(t, router, http.MethodGet, "/v1/perf/latency", "", nil)
+	if after.Code != http.StatusOK {
+		t.Fatalf("after status = %d, want %d", after.Code, http.StatusOK)
+	}
+	var afterPayload map[string]any
+	if err := json.Unmarshal(after.Body.Bytes(), &afterPayload); err != nil {
+		t.Fatalf("decode after response: %v", err)
+	}
+	afterStages, _ := afterPayload["stages"].([]any)
+	if len(afterStages) != 0 {
+		t.Fatalf("after stages len = %d, want 0", len(afterStages))
+	}
+}
+
 func TestTaskEndpointsDisabledByDefault(t *testing.T) {
 	cfg := config.Config{
 		SessionInactivityTimeout: 2 * time.Minute,

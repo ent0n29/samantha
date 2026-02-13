@@ -103,6 +103,17 @@ Response (`200`):
 }
 ```
 
+### `POST /v1/perf/latency/reset`
+
+Resets the in-memory turn-stage latency window used by `GET /v1/perf/latency`.
+
+Response (`200`):
+```json
+{
+  "status": "ok"
+}
+```
+
 ### `GET /v1/voice/voices`
 
 Lists available voices for the configured backend.

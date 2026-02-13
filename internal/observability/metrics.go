@@ -132,6 +132,13 @@ func (m *Metrics) SnapshotTurnStages() TurnStageSnapshot {
 	return m.turnStageWindow.Snapshot()
 }
 
+func (m *Metrics) ResetTurnStages() {
+	if m == nil || m.turnStageWindow == nil {
+		return
+	}
+	m.turnStageWindow.Reset()
+}
+
 func MetricsHandler() http.Handler {
 	return promhttp.Handler()
 }

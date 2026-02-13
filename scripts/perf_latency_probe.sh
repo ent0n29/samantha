@@ -11,6 +11,9 @@ FAIL_ON_TARGETS="${FAIL_ON_TARGETS:-0}"
 REQUIRE_SAMPLES="${REQUIRE_SAMPLES:-0}"
 MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES:-1}"
 FAIL_EARLY="${FAIL_EARLY:-1}"
+RESET_WINDOW="${RESET_WINDOW:-0}"
+REQUIRE_MIN_STAGE_SAMPLES="${REQUIRE_MIN_STAGE_SAMPLES:-0}"
+LATEST_JSON=""
 
 count=0
 seen_samples=0
@@ -22,6 +25,16 @@ echo "Fail on target breach: ${FAIL_ON_TARGETS}"
 echo "Require measured samples: ${REQUIRE_SAMPLES}"
 echo "Min stage samples before evaluating target: ${MIN_STAGE_SAMPLES}"
 echo "Fail early on first breach: ${FAIL_EARLY}"
+echo "Reset latency window before probe: ${RESET_WINDOW}"
+echo "Require min stage samples by end: ${REQUIRE_MIN_STAGE_SAMPLES}"
+
+if [[ "${RESET_WINDOW}" == "1" ]]; then
+  if curl -fsS -X POST "${BASE_URL}/v1/perf/latency/reset" >/dev/null 2>&1; then
+    echo "Latency window reset."
+  else
+    echo "warning: failed to reset latency window at ${BASE_URL}/v1/perf/latency/reset"
+  fi
+fi
 
 while true; do
   now="$(date '+%H:%M:%S')"
@@ -29,6 +42,7 @@ while true; do
   if [[ -z "${json}" ]]; then
     echo "[${now}] fetch failed"
   else
+    LATEST_JSON="${json}"
     has_samples="$(JSON_PAYLOAD="${json}" python3 - <<'PY'
 import json, os
 try:
@@ -130,6 +144,45 @@ if [[ "${REQUIRE_SAMPLES}" == "1" && "${seen_samples}" -eq 0 ]]; then
   echo "No measured latency samples were observed."
   echo "Speak to Samantha during the probe (at least a few complete turns), then rerun."
   exit 3
+fi
+
+if [[ "${REQUIRE_MIN_STAGE_SAMPLES}" == "1" ]]; then
+  if [[ -z "${LATEST_JSON}" ]]; then
+    echo "No latency snapshot data available at probe end."
+    exit 4
+  fi
+  if ! JSON_PAYLOAD="${LATEST_JSON}" python3 - "$MIN_STAGE_SAMPLES" <<'PY'
+import json
+import os
+import sys
+
+min_samples = int(float(sys.argv[1]))
+if min_samples < 1:
+    min_samples = 1
+
+try:
+    payload = json.loads(os.environ.get("JSON_PAYLOAD", "{}"))
+except Exception:
+    print("Invalid final latency snapshot JSON.")
+    raise SystemExit(4)
+
+by_stage = {str(item.get("stage", "")): int(item.get("samples", 0) or 0) for item in payload.get("stages", [])}
+required = ("commit_to_first_text", "commit_to_first_audio", "turn_total")
+missing = []
+for stage in required:
+    n = by_stage.get(stage, 0)
+    if n < min_samples:
+        missing.append(f"{stage}: {n}/{min_samples}")
+
+if missing:
+    print("Insufficient stage samples by end of probe:")
+    for item in missing:
+        print(f"- {item}")
+    raise SystemExit(4)
+PY
+  then
+    exit $?
+  fi
 fi
 
 if [[ "${FAIL_ON_TARGETS}" == "1" && "${had_target_breach}" -eq 1 ]]; then

@@ -13,3 +13,12 @@ func (s *Server) handlePerfLatency(w http.ResponseWriter, _ *http.Request) {
 	}
 	respondJSON(w, http.StatusOK, s.metrics.SnapshotTurnStages())
 }
+
+func (s *Server) handlePerfLatencyReset(w http.ResponseWriter, _ *http.Request) {
+	if s.metrics != nil {
+		s.metrics.ResetTurnStages()
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+	})
+}

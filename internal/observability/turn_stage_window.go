@@ -121,6 +121,15 @@ func (w *turnStageWindow) Snapshot() TurnStageSnapshot {
 	}
 }
 
+func (w *turnStageWindow) Reset() {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stages = make(map[string]*turnStageBuffer)
+}
+
 func quantile(sorted []float64, q float64) float64 {
 	if len(sorted) == 0 {
 		return 0

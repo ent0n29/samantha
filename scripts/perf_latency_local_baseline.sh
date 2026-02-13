@@ -14,9 +14,11 @@ REQUIRE_LOCAL_PROVIDER="${REQUIRE_LOCAL_PROVIDER:-0}"
 REQUIRE_SAMPLES="${REQUIRE_SAMPLES:-1}"
 MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES:-5}"
 FAIL_EARLY="${FAIL_EARLY:-0}"
+RESET_WINDOW="${RESET_WINDOW:-1}"
+REQUIRE_MIN_STAGE_SAMPLES="${REQUIRE_MIN_STAGE_SAMPLES:-1}"
 
 echo "Local-first latency baseline (VOICE_PROVIDER=local expected)"
-echo "interval=${INTERVAL_SEC}s samples=${SAMPLES} fail_on_targets=${FAIL_ON_TARGETS} require_samples=${REQUIRE_SAMPLES} min_stage_samples=${MIN_STAGE_SAMPLES} fail_early=${FAIL_EARLY}"
+echo "interval=${INTERVAL_SEC}s samples=${SAMPLES} fail_on_targets=${FAIL_ON_TARGETS} require_samples=${REQUIRE_SAMPLES} min_stage_samples=${MIN_STAGE_SAMPLES} fail_early=${FAIL_EARLY} reset_window=${RESET_WINDOW}"
 echo "Tip: talk to Samantha while this runs so latency stages are populated."
 
 onboarding_json="$(curl -fsS "${BASE_URL%/}/v1/onboarding/status" || true)"
@@ -49,4 +51,6 @@ FAIL_ON_TARGETS="${FAIL_ON_TARGETS}" \
 REQUIRE_SAMPLES="${REQUIRE_SAMPLES}" \
 MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES}" \
 FAIL_EARLY="${FAIL_EARLY}" \
+RESET_WINDOW="${RESET_WINDOW}" \
+REQUIRE_MIN_STAGE_SAMPLES="${REQUIRE_MIN_STAGE_SAMPLES}" \
   "${ROOT}/scripts/perf_latency_probe.sh" "${BASE_URL}"
