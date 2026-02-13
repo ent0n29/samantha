@@ -209,6 +209,10 @@ function shouldShowTaskDesk() {
   return qs.get("taskdesk") === "1" || qs.get("tasks") === "1";
 }
 
+function isTaskDeskVisible() {
+  return Boolean(el.taskDesk) && shouldShowTaskDesk();
+}
+
 function initViz() {
   if (!el.viz) {
     return;
@@ -2722,6 +2726,10 @@ function markTaskDeskSyncState(nextState) {
 
 function markTaskDeskConnected() {
   const td = state.taskDesk;
+  if (!isTaskDeskVisible()) {
+    clearTaskDeskFallbackTimer();
+    return;
+  }
   const sessionID = (state.sessionId || "").trim();
   if (!sessionID) {
     return;
@@ -2751,6 +2759,9 @@ function markTaskDeskConnected() {
 function markTaskDeskDisconnected() {
   const td = state.taskDesk;
   clearTaskDeskFallbackTimer();
+  if (!isTaskDeskVisible()) {
+    return;
+  }
   if (td.runtimeEnabled === false) {
     markTaskDeskSyncState("disabled");
     return;
@@ -3083,7 +3094,7 @@ function renderTaskDeskGroup(root, ids, emptyText) {
 }
 
 function renderTaskDesk() {
-  if (!el.taskDesk) {
+  if (!isTaskDeskVisible()) {
     return;
   }
   const td = state.taskDesk;
@@ -3126,7 +3137,7 @@ function renderTaskDesk() {
 async function bootstrapTaskDesk(sessionID, reason) {
   const td = state.taskDesk;
   const targetSession = String(sessionID || "").trim();
-  if (!targetSession || td.runtimeEnabled === false) {
+  if (!isTaskDeskVisible() || !targetSession || td.runtimeEnabled === false) {
     return;
   }
   if (td.bootstrapPromise && td.bootstrapForSession === targetSession) {
@@ -3206,7 +3217,7 @@ async function bootstrapTaskDesk(sessionID, reason) {
 async function hydrateTaskEvents(taskID, expectedSessionID) {
   const id = String(taskID || "").trim();
   const expected = String(expectedSessionID || state.taskDesk.sessionId || "").trim();
-  if (!id || state.taskDesk.runtimeEnabled === false) {
+  if (!isTaskDeskVisible() || !id || state.taskDesk.runtimeEnabled === false) {
     return;
   }
   const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}/events?limit=${TASK_EVENTS_LIMIT}`, { cache: "no-store" });
@@ -3233,7 +3244,7 @@ async function hydrateTaskEvents(taskID, expectedSessionID) {
 
 async function refreshTask(taskID, opts = {}) {
   const id = String(taskID || "").trim();
-  if (!id || state.taskDesk.runtimeEnabled === false) {
+  if (!isTaskDeskVisible() || !id || state.taskDesk.runtimeEnabled === false) {
     return;
   }
   const delayMS = Number(opts.delayMS) || 0;
@@ -3257,7 +3268,7 @@ async function handleTaskDeskAction(taskID, action) {
   const td = state.taskDesk;
   const id = String(taskID || "").trim();
   const op = String(action || "").trim();
-  if (!id || !op) {
+  if (!isTaskDeskVisible() || !id || !op) {
     return;
   }
   if (td.actionInFlight.has(id)) {
@@ -3484,6 +3495,9 @@ function applyTaskEventPatch(msg, opts = {}) {
 }
 
 function handleTaskSnapshot(msg) {
+  if (!isTaskDeskVisible()) {
+    return;
+  }
   const td = state.taskDesk;
   td.runtimeEnabled = true;
   td.metrics.task_snapshot_received += 1;
@@ -3506,6 +3520,9 @@ function handleTaskSnapshot(msg) {
 }
 
 function handleTaskEvent(msg) {
+  if (!isTaskDeskVisible()) {
+    return;
+  }
   applyTaskEventPatch(msg, { source: "live", suppressUI: false });
   renderTaskDesk();
 }
