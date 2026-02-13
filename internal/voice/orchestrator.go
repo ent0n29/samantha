@@ -1133,7 +1133,7 @@ func (o *Orchestrator) runAssistantTurn(
 	// Keep voice UX responsive: if the model hasn't started producing text quickly,
 	// emit a short visual progress cue instead of leaving dead air.
 	go func() {
-		timer := time.NewTimer(650 * time.Millisecond)
+		timer := time.NewTimer(500 * time.Millisecond)
 		defer timer.Stop()
 		select {
 		case <-ctx.Done():
