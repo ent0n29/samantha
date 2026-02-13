@@ -32,6 +32,8 @@ const VAD_SHORT_UTTERANCE_MS = 1500;
 const VAD_AUTO_COMMIT_SILENCE_MS = 430;
 const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 320;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 900;
+const PLAYBACK_PREWARM_COOLDOWN_MS = 45_000;
+const PLAYBACK_PREWARM_DURATION_SEC = 0.03;
 const THINKING_CUE_DELAY_MS = 140;
 const THINKING_CUE_MIN_INTERVAL_MS = 2600;
 const THINKING_CUE_DURATION_SEC = 0.12;
@@ -63,6 +65,7 @@ const state = {
   playbackGain: null,
   playbackNextTime: 0,
   playbackSources: new Set(),
+  playbackPrewarmAtMs: 0,
   streamScheduleQueue: Promise.resolve(),
   ignoredTurns: new Set(),
 
@@ -399,18 +402,27 @@ function wireUI() {
       return;
     }
     if (evt.key === "y" || evt.key === "Y") {
+      if (!isTaskDeskVisible()) {
+        return;
+      }
       evt.preventDefault();
       sendControl("approve_task_step");
       setCaption("Approval sent.", "", { clearAfterMs: 1400 });
       return;
     }
     if (evt.key === "n" || evt.key === "N") {
+      if (!isTaskDeskVisible()) {
+        return;
+      }
       evt.preventDefault();
       sendControl("deny_task_step");
       setCaption("Denial sent.", "", { clearAfterMs: 1400 });
       return;
     }
     if (evt.key === "x" || evt.key === "X") {
+      if (!isTaskDeskVisible()) {
+        return;
+      }
       evt.preventDefault();
       sendControl("cancel_task");
       setCaption("Cancel sent.", "", { clearAfterMs: 1400 });
@@ -2035,11 +2047,47 @@ async function ensurePlaybackContext() {
 function unlockAudio() {
   // Must be called from a user gesture to satisfy autoplay policies.
   if (state.playbackContext && state.playbackContext.state === "running") {
+    prewarmPlaybackPath(state.playbackContext);
     return;
   }
-  void ensurePlaybackContext().catch((_err) => {
+  void ensurePlaybackContext().then((ctx) => {
+    prewarmPlaybackPath(ctx);
+  }).catch((_err) => {
     // Ignore; playback will guide the user on demand.
   });
+}
+
+function prewarmPlaybackPath(ctx) {
+  const now = Date.now();
+  if (now - state.playbackPrewarmAtMs < PLAYBACK_PREWARM_COOLDOWN_MS) {
+    return;
+  }
+  if (!ctx || ctx.state !== "running" || !state.playbackGain) {
+    return;
+  }
+  if (!ctx.createBuffer || !ctx.createBufferSource || !ctx.createGain) {
+    return;
+  }
+
+  const frames = Math.max(1, Math.floor(ctx.sampleRate * PLAYBACK_PREWARM_DURATION_SEC));
+  const t0 = Math.max(ctx.currentTime, state.playbackNextTime || 0);
+  const src = ctx.createBufferSource();
+  const gain = ctx.createGain();
+  src.buffer = ctx.createBuffer(1, frames, ctx.sampleRate);
+  gain.gain.value = 0.0001;
+  src.connect(gain);
+  gain.connect(state.playbackGain);
+  src.onended = () => {
+    try {
+      src.disconnect();
+      gain.disconnect();
+    } catch (_err) {
+      // ignore
+    }
+  };
+  src.start(t0);
+  src.stop(t0 + PLAYBACK_PREWARM_DURATION_SEC);
+  state.playbackPrewarmAtMs = now;
 }
 
 function stopWebAudio() {
@@ -2514,6 +2562,7 @@ async function startMic() {
     state.silentGain = silentGain;
     state.micCaptureBackend = backend;
     state.micActive = true;
+    prewarmPlaybackPath(state.playbackContext);
     logEvent(`microphone started (${backend})`);
   } catch (err) {
     setPresence("error", "Samantha", `Mic error: ${stringifyError(err)}`);
