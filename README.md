@@ -25,8 +25,10 @@ API reference: `docs/API.md`.
   "theme": "base",
   "themeVariables": {
     "background": "transparent",
-    "lineColor": "#4b6b8f",
-    "primaryTextColor": "#d7e6f5",
+    "lineColor": "#9fc8ff",
+    "primaryTextColor": "#f3f9ff",
+    "edgeLabelBackground": "#0b1524",
+    "fontSize": "15px",
     "fontFamily": "ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif"
   }
 }}%%
@@ -74,16 +76,16 @@ flowchart LR
   Mem -. "when DATABASE_URL" .-> PG
   Task -. "task snapshots" .-> PG
 
-  classDef node fill:#111c2e,stroke:#5ea6ff,color:#eef6ff,stroke-width:1px;
-  classDef store fill:#12263a,stroke:#67e8f9,color:#e6fbff,stroke-width:1px;
+  classDef node fill:#0e1a2c,stroke:#9fc8ff,color:#f3f9ff,stroke-width:2px;
+  classDef store fill:#102537,stroke:#7ee7ff,color:#effdff,stroke-width:2px;
   class Mic,UX,API,Orch,Sess,Task,STT,TTS,Adapter,Agent node;
   class Mem,PG store;
 
-  style Client fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
-  style Server fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
-  style Voice fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
-  style Brain fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
-  style Storage fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
+  style Client fill:#0a1423,stroke:#416a94,color:#9fd7ff,stroke-width:2px;
+  style Server fill:#0a1423,stroke:#416a94,color:#9fd7ff,stroke-width:2px;
+  style Voice fill:#0a1423,stroke:#416a94,color:#9fd7ff,stroke-width:2px;
+  style Brain fill:#0a1423,stroke:#416a94,color:#9fd7ff,stroke-width:2px;
+  style Storage fill:#0a1423,stroke:#416a94,color:#9fd7ff,stroke-width:2px;
 
 ```
 
