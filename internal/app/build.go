@@ -88,6 +88,7 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		voiceSetup.ttsProvider,
 		metrics,
 		cfg.FirstAudioSLO,
+		cfg.AssistantWorkingDelay,
 		voiceSetup.defaultVoiceID,
 		voiceSetup.defaultModelID,
 		cfg.VoiceProvider,

@@ -15,14 +15,19 @@ type Config struct {
 	SessionInactivityTimeout time.Duration
 	SessionRetention         time.Duration
 	FirstAudioSLO            time.Duration
+	AssistantWorkingDelay    time.Duration
+	UISilenceBreakerDelay    time.Duration
 	MetricsNamespace         string
 	TaskRuntimeEnabled       bool
 	TaskTimeout              time.Duration
 	TaskIdempotencyWindow    time.Duration
 
-	AllowAnyOrigin bool
-	StrictOutbound bool
-	UIAudioWorklet bool
+	AllowAnyOrigin    bool
+	StrictOutbound    bool
+	UIAudioWorklet    bool
+	UITaskDeskDefault bool
+
+	UISilenceBreakerMode string
 
 	WSBackpressureMode string
 
@@ -101,11 +106,15 @@ func Load() (Config, error) {
 		SessionInactivityTimeout:  2 * time.Minute,
 		SessionRetention:          24 * time.Hour,
 		FirstAudioSLO:             700 * time.Millisecond,
+		AssistantWorkingDelay:     500 * time.Millisecond,
+		UISilenceBreakerDelay:     750 * time.Millisecond,
 		TaskRuntimeEnabled:        false,
 		TaskTimeout:               20 * time.Minute,
 		TaskIdempotencyWindow:     10 * time.Second,
 		StrictOutbound:            false,
 		UIAudioWorklet:            true,
+		UITaskDeskDefault:         false,
+		UISilenceBreakerMode:      envOrDefault("APP_UI_SILENCE_BREAKER_MODE", "visual"),
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
@@ -123,6 +132,14 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.FirstAudioSLO, err = durationFromEnv("APP_FIRST_AUDIO_SLO", cfg.FirstAudioSLO)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.AssistantWorkingDelay, err = durationFromEnv("APP_ASSISTANT_WORKING_DELAY", cfg.AssistantWorkingDelay)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UISilenceBreakerDelay, err = durationFromEnv("APP_UI_SILENCE_BREAKER_DELAY", cfg.UISilenceBreakerDelay)
 	if err != nil {
 		return Config{}, err
 	}
@@ -147,6 +164,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.UIAudioWorklet, err = boolFromEnv("APP_UI_AUDIO_WORKLET", cfg.UIAudioWorklet)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UITaskDeskDefault, err = boolFromEnv("APP_UI_TASK_DESK_DEFAULT", cfg.UITaskDeskDefault)
 	if err != nil {
 		return Config{}, err
 	}
@@ -186,6 +207,12 @@ func Load() (Config, error) {
 	if cfg.SessionRetention < 0 {
 		return Config{}, fmt.Errorf("APP_SESSION_RETENTION must be >= 0")
 	}
+	if cfg.AssistantWorkingDelay < 0 {
+		return Config{}, fmt.Errorf("APP_ASSISTANT_WORKING_DELAY must be >= 0")
+	}
+	if cfg.UISilenceBreakerDelay < 0 {
+		return Config{}, fmt.Errorf("APP_UI_SILENCE_BREAKER_DELAY must be >= 0")
+	}
 	if cfg.TaskTimeout <= 0 {
 		return Config{}, fmt.Errorf("APP_TASK_TIMEOUT must be > 0")
 	}
@@ -198,6 +225,13 @@ func Load() (Config, error) {
 	}
 	if cfg.WSBackpressureMode != "drop" && cfg.WSBackpressureMode != "block" {
 		return Config{}, fmt.Errorf("APP_WS_BACKPRESSURE_MODE must be one of: drop|block")
+	}
+	cfg.UISilenceBreakerMode = strings.ToLower(trimSpace(cfg.UISilenceBreakerMode))
+	if cfg.UISilenceBreakerMode == "" {
+		cfg.UISilenceBreakerMode = "visual"
+	}
+	if cfg.UISilenceBreakerMode != "off" && cfg.UISilenceBreakerMode != "visual" && cfg.UISilenceBreakerMode != "speech" {
+		return Config{}, fmt.Errorf("APP_UI_SILENCE_BREAKER_MODE must be one of: off|visual|speech")
 	}
 	if cfg.MemoryEmbeddingDim <= 0 {
 		return Config{}, fmt.Errorf("MEMORY_EMBEDDING_DIM must be positive")

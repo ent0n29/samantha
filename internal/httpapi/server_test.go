@@ -128,6 +128,55 @@ func TestOnboardingStatus(t *testing.T) {
 	}
 }
 
+func TestUISettings(t *testing.T) {
+	cfg := config.Config{
+		SessionInactivityTimeout: 2 * time.Minute,
+		UIAudioWorklet:           true,
+		UITaskDeskDefault:        false,
+		UISilenceBreakerMode:     "visual",
+		UISilenceBreakerDelay:    900 * time.Millisecond,
+		TaskRuntimeEnabled:       true,
+		TaskTimeout:              5 * time.Minute,
+		TaskIdempotencyWindow:    10 * time.Second,
+	}
+	sessions := session.NewManager(cfg.SessionInactivityTimeout)
+	metrics := observability.NewMetrics("test_httpapi_ui_settings_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
+	taskService := taskruntime.New(taskruntime.Config{
+		Enabled:           true,
+		TaskTimeout:       cfg.TaskTimeout,
+		IdempotencyWindow: cfg.TaskIdempotencyWindow,
+	}, openclaw.NewMockAdapter(), metrics)
+	defer func() { _ = taskService.Close() }()
+
+	srv := New(cfg, sessions, nil, metrics, taskService)
+	router := srv.Router()
+
+	res := doRequest(t, router, http.MethodGet, "/v1/ui/settings", "", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(res.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["ui_audio_worklet"] != true {
+		t.Fatalf("ui_audio_worklet = %v, want true", payload["ui_audio_worklet"])
+	}
+	if payload["task_runtime_enabled"] != true {
+		t.Fatalf("task_runtime_enabled = %v, want true", payload["task_runtime_enabled"])
+	}
+	if payload["task_desk_default"] != false {
+		t.Fatalf("task_desk_default = %v, want false", payload["task_desk_default"])
+	}
+	if payload["silence_breaker_mode"] != "visual" {
+		t.Fatalf("silence_breaker_mode = %v, want visual", payload["silence_breaker_mode"])
+	}
+	if payload["silence_breaker_delay_ms"] != float64(900) {
+		t.Fatalf("silence_breaker_delay_ms = %v, want 900", payload["silence_breaker_delay_ms"])
+	}
+}
+
 func TestPerfLatencySnapshot(t *testing.T) {
 	cfg := config.Config{
 		SessionInactivityTimeout: 2 * time.Minute,

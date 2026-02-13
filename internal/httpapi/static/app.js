@@ -34,7 +34,10 @@ const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 280;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 700;
 const PLAYBACK_PREWARM_COOLDOWN_MS = 45_000;
 const PLAYBACK_PREWARM_DURATION_SEC = 0.03;
-const THINKING_CUE_DELAY_MS = 140;
+const UI_SILENCE_BREAKER_MODE_DEFAULT = "visual";
+const UI_SILENCE_BREAKER_DELAY_MS_DEFAULT = 750;
+const UI_SILENCE_BREAKER_DELAY_MIN_MS = 120;
+const UI_SILENCE_BREAKER_DELAY_MAX_MS = 10_000;
 const THINKING_CUE_MIN_INTERVAL_MS = 2600;
 const THINKING_CUE_DURATION_SEC = 0.12;
 const THINKING_CUE_GAIN = 0.045;
@@ -81,8 +84,10 @@ const state = {
   lastTurnID: "",
 
   captionClearTimer: null,
+  silenceBreakerTimer: null,
   thinkingCueTimer: null,
   lastThinkingCueAtMs: 0,
+  awaitingAssistantResponse: false,
 
   longPressTimer: null,
   longPressFired: false,
@@ -132,6 +137,11 @@ const state = {
   perfSnapshot: null,
   perfError: "",
   perfUpdatedAtMs: 0,
+  uiSettings: {
+    silenceBreakerMode: UI_SILENCE_BREAKER_MODE_DEFAULT,
+    silenceBreakerDelayMs: UI_SILENCE_BREAKER_DELAY_MS_DEFAULT,
+    taskDeskDefault: false,
+  },
 
   taskDesk: {
     runtimeEnabled: null,
@@ -203,6 +213,7 @@ function init() {
   hydratePrefs();
   wireUI();
   wireOnboarding();
+  void loadUISettings();
   wirePointerParallax();
   initViz();
   startEnergyLoop();
@@ -224,11 +235,62 @@ function applySurfaceFlags() {
 
 function shouldShowTaskDesk() {
   const qs = new URLSearchParams(window.location.search || "");
-  return qs.get("taskdesk") === "1" || qs.get("tasks") === "1";
+  if (qs.get("taskdesk") === "1" || qs.get("tasks") === "1") {
+    return true;
+  }
+  if (qs.get("taskdesk") === "0" || qs.get("tasks") === "0") {
+    return false;
+  }
+  return Boolean(state.uiSettings.taskDeskDefault);
 }
 
 function isTaskDeskVisible() {
   return Boolean(el.taskDesk) && shouldShowTaskDesk();
+}
+
+function normalizeSilenceBreakerMode(raw) {
+  const mode = String(raw || "").trim().toLowerCase();
+  if (mode === "off" || mode === "visual" || mode === "speech") {
+    return mode;
+  }
+  return UI_SILENCE_BREAKER_MODE_DEFAULT;
+}
+
+function normalizeSilenceBreakerDelayMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return UI_SILENCE_BREAKER_DELAY_MS_DEFAULT;
+  }
+  return Math.min(UI_SILENCE_BREAKER_DELAY_MAX_MS, Math.max(UI_SILENCE_BREAKER_DELAY_MIN_MS, Math.round(ms)));
+}
+
+async function loadUISettings() {
+  try {
+    const res = await fetch("/v1/ui/settings", { cache: "no-store" });
+    if (!res.ok) {
+      return;
+    }
+    const payload = await res.json();
+    if (Object.prototype.hasOwnProperty.call(payload, "ui_audio_worklet")) {
+      state.preferAudioWorklet = Boolean(payload.ui_audio_worklet);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "task_runtime_enabled")) {
+      state.taskDesk.runtimeEnabled = Boolean(payload.task_runtime_enabled);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "task_desk_default")) {
+      state.uiSettings.taskDeskDefault = Boolean(payload.task_desk_default);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "silence_breaker_mode")) {
+      state.uiSettings.silenceBreakerMode = normalizeSilenceBreakerMode(payload.silence_breaker_mode);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "silence_breaker_delay_ms")) {
+      state.uiSettings.silenceBreakerDelayMs = normalizeSilenceBreakerDelayMs(payload.silence_breaker_delay_ms);
+    }
+    applySurfaceFlags();
+    renderTaskDesk();
+  } catch (_err) {
+    // ignore
+  }
 }
 
 function initViz() {
@@ -2657,6 +2719,8 @@ function handleServerMessage(raw) {
       clearBargePreroll();
       state.awakeUntilMs = 0;
       state.manualArmUntilMs = 0;
+      state.awaitingAssistantResponse = true;
+      clearSilenceBreakerTimer();
       setPresence("thinking", "", "");
       setCaption("", msg.text || "", { clearAfterMs: 1200 });
       break;
@@ -2670,6 +2734,8 @@ function handleServerMessage(raw) {
       if (state.ignoredTurns && state.ignoredTurns.has(msg.turn_id || "")) {
         break;
       }
+      state.awaitingAssistantResponse = false;
+      clearSilenceBreakerTimer();
       setPresence("thinking", "", "");
       handleAssistantDelta(msg);
       break;
@@ -2681,6 +2747,8 @@ function handleServerMessage(raw) {
       if (state.ignoredTurns && state.ignoredTurns.has(msg.turn_id || "")) {
         break;
       }
+      state.awaitingAssistantResponse = false;
+      clearSilenceBreakerTimer();
       state.speakEnergyTarget = Math.max(state.speakEnergyTarget, 0.32);
       setPresence("speaking", "…", "");
       handleAssistantAudio(msg);
@@ -2702,6 +2770,8 @@ function handleServerMessage(raw) {
       handleTaskEvent(msg);
       break;
     case "error_event":
+      state.awaitingAssistantResponse = false;
+      clearSilenceBreakerTimer();
       setPresence("error", "Something went wrong.", `${msg.code || "error"} (${msg.source || "gateway"})`);
       logError(`error_event ${msg.code || ""} ${msg.detail || ""}`.trim());
       break;
@@ -2721,8 +2791,11 @@ function handleSystemEvent(msg) {
       logEvent("wake word detected");
       break;
     case "assistant_working":
+      if (!state.awaitingAssistantResponse) {
+        break;
+      }
       setPresence("thinking", "", "");
-      scheduleThinkingCue();
+      scheduleSilenceBreaker();
       logEvent("assistant working");
       break;
     default:
@@ -2786,6 +2859,8 @@ function handleAssistantAudio(msg) {
 function handleAssistantTurnEnd(msg) {
   const turnID = msg.turn_id || "turn-unknown";
   const reason = msg.reason || "completed";
+  state.awaitingAssistantResponse = false;
+  clearSilenceBreakerTimer();
   const reasonNorm = String(reason || "").trim().toLowerCase();
   const aborted = reasonNorm === "interrupted" || reasonNorm === "barge_in" || reasonNorm === "connection_closed";
   if (aborted) {
@@ -3775,6 +3850,7 @@ function setPresence(mode, primary, secondary) {
   state.presence = normalized;
 
   if (normalized !== "thinking") {
+    clearSilenceBreakerTimer();
     clearThinkingCueTimer();
   }
 
@@ -3793,6 +3869,14 @@ function setPresence(mode, primary, secondary) {
   setCaption(primaryLine, secondaryLine, { clearAfterMs: normalized === "connected" ? 2600 : 0 });
 }
 
+function clearSilenceBreakerTimer() {
+  if (!state.silenceBreakerTimer) {
+    return;
+  }
+  clearTimeout(state.silenceBreakerTimer);
+  state.silenceBreakerTimer = null;
+}
+
 function clearThinkingCueTimer() {
   if (!state.thinkingCueTimer) {
     return;
@@ -3801,12 +3885,31 @@ function clearThinkingCueTimer() {
   state.thinkingCueTimer = null;
 }
 
-function scheduleThinkingCue() {
+function scheduleSilenceBreaker() {
+  clearSilenceBreakerTimer();
   clearThinkingCueTimer();
-  state.thinkingCueTimer = setTimeout(() => {
-    state.thinkingCueTimer = null;
-    void playThinkingCue();
-  }, THINKING_CUE_DELAY_MS);
+  if (!state.connected || !state.awaitingAssistantResponse) {
+    return;
+  }
+  const mode = normalizeSilenceBreakerMode(state.uiSettings.silenceBreakerMode);
+  if (mode === "off") {
+    return;
+  }
+  const delayMs = normalizeSilenceBreakerDelayMs(state.uiSettings.silenceBreakerDelayMs);
+  state.silenceBreakerTimer = setTimeout(() => {
+    state.silenceBreakerTimer = null;
+    if (!state.connected || state.presence !== "thinking" || !state.awaitingAssistantResponse) {
+      return;
+    }
+    if (mode === "visual") {
+      setCaption("", "…", { clearAfterMs: 1200 });
+      return;
+    }
+    if (mode === "speech") {
+      setCaption("", "…", { clearAfterMs: 1200 });
+      void playThinkingCue();
+    }
+  }, delayMs);
 }
 
 async function playThinkingCue() {

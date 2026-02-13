@@ -43,21 +43,22 @@ type brainPrefetchResult struct {
 }
 
 type Orchestrator struct {
-	sessions       *session.Manager
-	adapter        openclaw.Adapter
-	memoryStore    memory.Store
-	sttProvider    STTProvider
-	ttsProvider    TTSProvider
-	metrics        *observability.Metrics
-	firstAudioSLO  time.Duration
-	defaultVoice   string
-	defaultModel   string
-	sttLabel       string
-	ttsLabel       string
-	profiles       map[string]PersonaProfile
-	strictOutbound bool
-	outboundMode   string
-	taskService    *taskruntime.Service
+	sessions              *session.Manager
+	adapter               openclaw.Adapter
+	memoryStore           memory.Store
+	sttProvider           STTProvider
+	ttsProvider           TTSProvider
+	metrics               *observability.Metrics
+	firstAudioSLO         time.Duration
+	assistantWorkingDelay time.Duration
+	defaultVoice          string
+	defaultModel          string
+	sttLabel              string
+	ttsLabel              string
+	profiles              map[string]PersonaProfile
+	strictOutbound        bool
+	outboundMode          string
+	taskService           *taskruntime.Service
 }
 
 const (
@@ -82,6 +83,7 @@ func NewOrchestrator(
 	ttsProvider TTSProvider,
 	metrics *observability.Metrics,
 	firstAudioSLO time.Duration,
+	assistantWorkingDelay time.Duration,
 	defaultVoice string,
 	defaultModel string,
 	voiceProvider string,
@@ -135,21 +137,22 @@ func NewOrchestrator(
 	}
 
 	return &Orchestrator{
-		sessions:       sessions,
-		adapter:        adapter,
-		memoryStore:    memoryStore,
-		sttProvider:    sttProvider,
-		ttsProvider:    ttsProvider,
-		metrics:        metrics,
-		firstAudioSLO:  firstAudioSLO,
-		defaultVoice:   defaultVoice,
-		defaultModel:   defaultModel,
-		sttLabel:       vp + "_stt",
-		ttsLabel:       vp + "_tts",
-		profiles:       profiles,
-		strictOutbound: strictOutbound,
-		outboundMode:   mode,
-		taskService:    taskService,
+		sessions:              sessions,
+		adapter:               adapter,
+		memoryStore:           memoryStore,
+		sttProvider:           sttProvider,
+		ttsProvider:           ttsProvider,
+		metrics:               metrics,
+		firstAudioSLO:         firstAudioSLO,
+		assistantWorkingDelay: assistantWorkingDelay,
+		defaultVoice:          defaultVoice,
+		defaultModel:          defaultModel,
+		sttLabel:              vp + "_stt",
+		ttsLabel:              vp + "_tts",
+		profiles:              profiles,
+		strictOutbound:        strictOutbound,
+		outboundMode:          mode,
+		taskService:           taskService,
 	}
 }
 
@@ -1132,22 +1135,24 @@ func (o *Orchestrator) runAssistantTurn(
 
 	// Keep voice UX responsive: if the model hasn't started producing text quickly,
 	// emit a short visual progress cue instead of leaving dead air.
-	go func() {
-		timer := time.NewTimer(500 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-firstTextSignal:
-			return
-		case <-timer.C:
-			o.send(outbound, protocol.SystemEvent{
-				Type:      protocol.TypeSystemEvent,
-				SessionID: s.ID,
-				Code:      "assistant_working",
-			})
-		}
-	}()
+	if o.assistantWorkingDelay > 0 {
+		go func() {
+			timer := time.NewTimer(o.assistantWorkingDelay)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-firstTextSignal:
+				return
+			case <-timer.C:
+				o.send(outbound, protocol.SystemEvent{
+					Type:      protocol.TypeSystemEvent,
+					SessionID: s.ID,
+					Code:      "assistant_working",
+				})
+			}
+		}()
+	}
 
 	var assistantOut string
 	leadFilter := newLeadResponseFilter()

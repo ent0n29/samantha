@@ -110,6 +110,10 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `APP_SESSION_RETENTION` (ended-session retention window before pruning)
 - `APP_STRICT_OUTBOUND` + `APP_WS_BACKPRESSURE_MODE=drop|block`
 - `APP_UI_AUDIO_WORKLET` (attempt low-latency AudioWorklet mic capture in `/ui/`, with fallback)
+- `APP_ASSISTANT_WORKING_DELAY` (backend delay before emitting `assistant_working`; `0` disables)
+- `APP_UI_SILENCE_BREAKER_MODE=off|visual|speech` (dead-air behavior while waiting)
+- `APP_UI_SILENCE_BREAKER_DELAY` (delay before silence-breaker triggers after `assistant_working`)
+- `APP_UI_TASK_DESK_DEFAULT` (keep Task Desk hidden by default in core `/ui/`)
 - `APP_TASK_RUNTIME_ENABLED`, `APP_TASK_TIMEOUT`, `APP_TASK_IDEMPOTENCY_WINDOW` (voice-to-task runtime)
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
 - `OPENCLAW_HTTP_URL` (when using `http`)

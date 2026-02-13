@@ -64,6 +64,21 @@ Response (`200`):
 }
 ```
 
+### `GET /v1/ui/settings`
+
+Returns runtime UI behavior settings used by `/ui/`.
+
+Response (`200`):
+```json
+{
+  "ui_audio_worklet": true,
+  "task_runtime_enabled": false,
+  "task_desk_default": false,
+  "silence_breaker_mode": "visual",
+  "silence_breaker_delay_ms": 750
+}
+```
+
 ### `GET /v1/perf/latency`
 
 Returns a rolling in-memory latency snapshot (recent window) for key turn stages.
@@ -206,7 +221,7 @@ Server sends:
 - `assistant_text_delta` (streaming assistant text)
 - `assistant_audio_chunk` (base64 audio)
 - `assistant_turn_end`
-- `system_event` (e.g. `wake_word`)
+- `system_event` (e.g. `wake_word`, `assistant_working`)
 - `error_event`
 - `task_created`
 - `task_plan_delta`

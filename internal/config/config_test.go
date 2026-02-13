@@ -33,6 +33,18 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.OpenClawCLIStreamMinChars != 16 {
 		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 16)
 	}
+	if cfg.AssistantWorkingDelay != 500*time.Millisecond {
+		t.Fatalf("AssistantWorkingDelay = %s, want 500ms", cfg.AssistantWorkingDelay)
+	}
+	if cfg.UISilenceBreakerMode != "visual" {
+		t.Fatalf("UISilenceBreakerMode = %q, want %q", cfg.UISilenceBreakerMode, "visual")
+	}
+	if cfg.UISilenceBreakerDelay != 750*time.Millisecond {
+		t.Fatalf("UISilenceBreakerDelay = %s, want 750ms", cfg.UISilenceBreakerDelay)
+	}
+	if cfg.UITaskDeskDefault {
+		t.Fatalf("UITaskDeskDefault = true, want false")
+	}
 }
 
 func TestLoadUsesExplicitOpenClawHTTPURL(t *testing.T) {
@@ -97,6 +109,20 @@ func TestLoadRejectsInvalidBackpressureMode(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidUISilenceBreakerMode(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9399")
+	t.Setenv("APP_UI_SILENCE_BREAKER_MODE", "noisy")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid APP_UI_SILENCE_BREAKER_MODE")
+	}
+	if !strings.Contains(err.Error(), "APP_UI_SILENCE_BREAKER_MODE") {
+		t.Fatalf("Load() error = %v, want APP_UI_SILENCE_BREAKER_MODE validation error", err)
+	}
+}
+
 func TestLoadRejectsInvalidOpenClawCLIThinking(t *testing.T) {
 	setCoreEnvEmpty(t)
 	t.Setenv("APP_BIND_ADDR", ":9394")
@@ -135,6 +161,10 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	t.Setenv("APP_TASK_RUNTIME_ENABLED", "true")
 	t.Setenv("APP_TASK_TIMEOUT", "30m")
 	t.Setenv("APP_TASK_IDEMPOTENCY_WINDOW", "15s")
+	t.Setenv("APP_ASSISTANT_WORKING_DELAY", "320ms")
+	t.Setenv("APP_UI_SILENCE_BREAKER_MODE", "off")
+	t.Setenv("APP_UI_SILENCE_BREAKER_DELAY", "1400ms")
+	t.Setenv("APP_UI_TASK_DESK_DEFAULT", "true")
 	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
 
 	cfg, err := Load()
@@ -162,6 +192,18 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	if cfg.TaskIdempotencyWindow != 15*time.Second {
 		t.Fatalf("TaskIdempotencyWindow = %s, want 15s", cfg.TaskIdempotencyWindow)
 	}
+	if cfg.AssistantWorkingDelay != 320*time.Millisecond {
+		t.Fatalf("AssistantWorkingDelay = %s, want 320ms", cfg.AssistantWorkingDelay)
+	}
+	if cfg.UISilenceBreakerMode != "off" {
+		t.Fatalf("UISilenceBreakerMode = %q, want %q", cfg.UISilenceBreakerMode, "off")
+	}
+	if cfg.UISilenceBreakerDelay != 1400*time.Millisecond {
+		t.Fatalf("UISilenceBreakerDelay = %s, want 1400ms", cfg.UISilenceBreakerDelay)
+	}
+	if !cfg.UITaskDeskDefault {
+		t.Fatalf("UITaskDeskDefault = false, want true")
+	}
 	if !cfg.OpenClawHTTPStreamStrict {
 		t.Fatalf("OpenClawHTTPStreamStrict = false, want true")
 	}
@@ -178,10 +220,14 @@ func setCoreEnvEmpty(t *testing.T) {
 		"APP_TASK_RUNTIME_ENABLED",
 		"APP_TASK_TIMEOUT",
 		"APP_TASK_IDEMPOTENCY_WINDOW",
+		"APP_ASSISTANT_WORKING_DELAY",
 		"APP_METRICS_NAMESPACE",
 		"APP_ALLOW_ANY_ORIGIN",
 		"APP_STRICT_OUTBOUND",
 		"APP_UI_AUDIO_WORKLET",
+		"APP_UI_SILENCE_BREAKER_MODE",
+		"APP_UI_SILENCE_BREAKER_DELAY",
+		"APP_UI_TASK_DESK_DEFAULT",
 		"APP_WS_BACKPRESSURE_MODE",
 		"VOICE_PROVIDER",
 		"ELEVENLABS_API_KEY",
