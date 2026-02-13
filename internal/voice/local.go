@@ -437,9 +437,9 @@ func (s *localTTSStream) SendText(_ context.Context, text string, tryTrigger boo
 	if !s.closed {
 		s.pending += text
 		if tryTrigger {
-			minChars := 48
+			minChars := 36
 			if s.segmentsOut == 0 {
-				minChars = 28
+				minChars = 18
 			}
 			ready, s.pending = splitTTSReadySegments(s.pending, minChars, 200)
 		}

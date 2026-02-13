@@ -40,6 +40,8 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `OPENCLAW_WORKSPACE_DIR` (override workspace path; for new agents defaults to `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID`)
 - `OPENCLAW_CLI_PATH` (when using `cli` or `auto`)
 - `OPENCLAW_CLI_THINKING=minimal|low|medium|high` (lower is faster first response; default `low`)
+- `OPENCLAW_CLI_STREAMING=true|false` (feature-flag incremental CLI text streaming; default `true`)
+- `OPENCLAW_CLI_STREAM_MIN_CHARS` (chunking threshold for incremental CLI streaming; default `24`)
 - `DATABASE_URL` (optional; enables Postgres-backed memory)
   - Also persists task runtime state (`tasks`, `task_steps`) when task runtime is enabled.
 

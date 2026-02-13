@@ -44,11 +44,13 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 	}
 
 	adapter, err := openclaw.NewAdapter(openclaw.Config{
-		Mode:             cfg.OpenClawAdapterMode,
-		HTTPURL:          cfg.OpenClawHTTPURL,
-		CLIPath:          cfg.OpenClawCLIPath,
-		CLIThinking:      cfg.OpenClawCLIThinking,
-		HTTPStreamStrict: cfg.OpenClawHTTPStreamStrict,
+		Mode:              cfg.OpenClawAdapterMode,
+		HTTPURL:           cfg.OpenClawHTTPURL,
+		CLIPath:           cfg.OpenClawCLIPath,
+		CLIThinking:       cfg.OpenClawCLIThinking,
+		CLIStreaming:      cfg.OpenClawCLIStreaming,
+		CLIStreamMinChars: cfg.OpenClawCLIStreamMinChars,
+		HTTPStreamStrict:  cfg.OpenClawHTTPStreamStrict,
 	})
 	if err != nil {
 		_ = memoryStore.Close()

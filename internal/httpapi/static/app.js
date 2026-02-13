@@ -26,7 +26,7 @@ const VAD_RELATIVE_THRESHOLD = 2.4;
 const VAD_MAX_ZCR = 0.25; // zero-crossing rate (0..1). Higher tends to be noise/clicks.
 const VAD_MAX_CREST = 25; // peak/rms. Very high tends to be impulse noise (keyboard clicks).
 const VAD_ATTACK_FRAMES = 3; // ~190-260ms depending capture frame size; prevents click triggers.
-const VAD_RELEASE_FRAMES = 8; // ~650ms hangover before auto-commit.
+const VAD_RELEASE_FRAMES = 6; // ~450-520ms hangover before auto-commit.
 
 const state = {
   sessionId: "",
@@ -973,11 +973,11 @@ function maybeAutoCommit() {
   const now = Date.now();
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
-  if (silenceMs < 650) {
+  if (silenceMs < 430) {
     return;
   }
   // Avoid spamming commit during long silences.
-  if (now - state.lastAutoCommitAtMs < 1200) {
+  if (now - state.lastAutoCommitAtMs < 900) {
     return;
   }
 
@@ -2527,7 +2527,7 @@ function handleServerMessage(raw) {
       clearBargePreroll();
       state.awakeUntilMs = 0;
       state.manualArmUntilMs = 0;
-      setPresence("thinking", "Thinking…", "");
+      setPresence("thinking", "…", "");
       setCaption("", msg.text || "", { clearAfterMs: 1200 });
       break;
     case "system_event":
@@ -2591,10 +2591,7 @@ function handleSystemEvent(msg) {
       logEvent("wake word detected");
       break;
     case "assistant_working":
-      setPresence("thinking", "Thinking…", "");
-      if (msg.detail) {
-        setCaption("Thinking…", String(msg.detail || ""), { clearAfterMs: 1600 });
-      }
+      setPresence("thinking", "…", "");
       logEvent("assistant working");
       break;
     default:

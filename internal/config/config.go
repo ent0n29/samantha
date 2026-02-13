@@ -48,11 +48,13 @@ type Config struct {
 	LocalKokoroVoice        string
 	LocalKokoroLangCode     string
 
-	OpenClawAdapterMode      string
-	OpenClawHTTPURL          string
-	OpenClawCLIPath          string
-	OpenClawCLIThinking      string
-	OpenClawHTTPStreamStrict bool
+	OpenClawAdapterMode       string
+	OpenClawHTTPURL           string
+	OpenClawCLIPath           string
+	OpenClawCLIThinking       string
+	OpenClawCLIStreaming      bool
+	OpenClawCLIStreamMinChars int
+	OpenClawHTTPStreamStrict  bool
 
 	DatabaseURL        string
 	MemoryEmbeddingDim int
@@ -79,31 +81,33 @@ func Load() (Config, error) {
 		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-base.bin"),
 		LocalWhisperLanguage:  envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),
 		// 0 means "auto" (picked based on CPU count).
-		LocalWhisperThreads:      0,
-		LocalWhisperBeamSize:     1,
-		LocalWhisperBestOf:       1,
-		LocalKokoroPython:        envOrDefault("LOCAL_KOKORO_PYTHON", ""),
-		LocalKokoroWorkerScript:  envOrDefault("LOCAL_KOKORO_WORKER_SCRIPT", "scripts/kokoro_worker.py"),
-		LocalKokoroVoice:         envOrDefault("LOCAL_KOKORO_VOICE", "af_heart"),
-		LocalKokoroLangCode:      envOrDefault("LOCAL_KOKORO_LANG_CODE", "a"),
-		OpenClawAdapterMode:      envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
-		OpenClawHTTPURL:          stringsTrimSpace("OPENCLAW_HTTP_URL"),
-		OpenClawCLIPath:          envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
-		OpenClawCLIThinking:      envOrDefault("OPENCLAW_CLI_THINKING", "low"),
-		ElevenLabsAPIKey:         stringsTrimSpace("ELEVENLABS_API_KEY"),
-		DatabaseURL:              stringsTrimSpace("DATABASE_URL"),
-		MemoryEmbeddingDim:       1536,
-		ShutdownTimeout:          15 * time.Second,
-		SessionInactivityTimeout: 2 * time.Minute,
-		SessionRetention:         24 * time.Hour,
-		FirstAudioSLO:            700 * time.Millisecond,
-		TaskRuntimeEnabled:       false,
-		TaskTimeout:              20 * time.Minute,
-		TaskIdempotencyWindow:    10 * time.Second,
-		StrictOutbound:           false,
-		UIAudioWorklet:           true,
-		WSBackpressureMode:       envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
-		OpenClawHTTPStreamStrict: false,
+		LocalWhisperThreads:       0,
+		LocalWhisperBeamSize:      1,
+		LocalWhisperBestOf:        1,
+		LocalKokoroPython:         envOrDefault("LOCAL_KOKORO_PYTHON", ""),
+		LocalKokoroWorkerScript:   envOrDefault("LOCAL_KOKORO_WORKER_SCRIPT", "scripts/kokoro_worker.py"),
+		LocalKokoroVoice:          envOrDefault("LOCAL_KOKORO_VOICE", "af_heart"),
+		LocalKokoroLangCode:       envOrDefault("LOCAL_KOKORO_LANG_CODE", "a"),
+		OpenClawAdapterMode:       envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
+		OpenClawHTTPURL:           stringsTrimSpace("OPENCLAW_HTTP_URL"),
+		OpenClawCLIPath:           envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
+		OpenClawCLIThinking:       envOrDefault("OPENCLAW_CLI_THINKING", "low"),
+		OpenClawCLIStreaming:      true,
+		OpenClawCLIStreamMinChars: 24,
+		ElevenLabsAPIKey:          stringsTrimSpace("ELEVENLABS_API_KEY"),
+		DatabaseURL:               stringsTrimSpace("DATABASE_URL"),
+		MemoryEmbeddingDim:        1536,
+		ShutdownTimeout:           15 * time.Second,
+		SessionInactivityTimeout:  2 * time.Minute,
+		SessionRetention:          24 * time.Hour,
+		FirstAudioSLO:             700 * time.Millisecond,
+		TaskRuntimeEnabled:        false,
+		TaskTimeout:               20 * time.Minute,
+		TaskIdempotencyWindow:     10 * time.Second,
+		StrictOutbound:            false,
+		UIAudioWorklet:            true,
+		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
+		OpenClawHTTPStreamStrict:  false,
 	}
 	var err error
 	cfg.ShutdownTimeout, err = durationFromEnv("APP_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout)
@@ -154,6 +158,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.OpenClawCLIStreaming, err = boolFromEnv("OPENCLAW_CLI_STREAMING", cfg.OpenClawCLIStreaming)
+	if err != nil {
+		return Config{}, err
+	}
 
 	cfg.LocalWhisperThreads, err = intFromEnv("LOCAL_WHISPER_THREADS", cfg.LocalWhisperThreads)
 	if err != nil {
@@ -164,6 +172,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.LocalWhisperBestOf, err = intFromEnv("LOCAL_WHISPER_BEST_OF", cfg.LocalWhisperBestOf)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.OpenClawCLIStreamMinChars, err = intFromEnv("OPENCLAW_CLI_STREAM_MIN_CHARS", cfg.OpenClawCLIStreamMinChars)
 	if err != nil {
 		return Config{}, err
 	}
@@ -207,6 +219,12 @@ func Load() (Config, error) {
 	case "minimal", "low", "medium", "high":
 	default:
 		return Config{}, fmt.Errorf("OPENCLAW_CLI_THINKING must be one of: minimal|low|medium|high")
+	}
+	if cfg.OpenClawCLIStreamMinChars <= 0 {
+		return Config{}, fmt.Errorf("OPENCLAW_CLI_STREAM_MIN_CHARS must be > 0")
+	}
+	if cfg.OpenClawCLIStreamMinChars > 2048 {
+		return Config{}, fmt.Errorf("OPENCLAW_CLI_STREAM_MIN_CHARS must be <= 2048")
 	}
 
 	return cfg, nil

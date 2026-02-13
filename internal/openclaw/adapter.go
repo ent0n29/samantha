@@ -33,11 +33,13 @@ type Adapter interface {
 
 // Config controls adapter construction.
 type Config struct {
-	Mode             string
-	HTTPURL          string
-	CLIPath          string
-	CLIThinking      string
-	HTTPStreamStrict bool
+	Mode              string
+	HTTPURL           string
+	CLIPath           string
+	CLIThinking       string
+	CLIStreaming      bool
+	CLIStreamMinChars int
+	HTTPStreamStrict  bool
 }
 
 func NewAdapter(cfg Config) (Adapter, error) {
@@ -53,7 +55,7 @@ func NewAdapter(cfg Config) (Adapter, error) {
 		if strings.TrimSpace(cfg.CLIPath) == "" {
 			return nil, errors.New("openclaw CLI path is required for cli mode")
 		}
-		return NewCLIAdapter(cfg.CLIPath, cfg.CLIThinking), nil
+		return NewCLIAdapter(cfg.CLIPath, cfg.CLIThinking, cfg.CLIStreaming, cfg.CLIStreamMinChars), nil
 	case "http":
 		if strings.TrimSpace(cfg.HTTPURL) == "" {
 			return nil, errors.New("openclaw HTTP url is required for http mode")
@@ -72,7 +74,7 @@ func newAutoAdapter(cfg Config) Adapter {
 		if _, err := exec.LookPath(cliPath); err == nil {
 			// Fail fast when the CLI exists: silent fallbacks hide auth/provider issues and
 			// make it hard to know whether you're running the real brain.
-			return NewCLIAdapter(cliPath, cfg.CLIThinking)
+			return NewCLIAdapter(cliPath, cfg.CLIThinking, cfg.CLIStreaming, cfg.CLIStreamMinChars)
 		}
 	}
 

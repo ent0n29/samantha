@@ -27,6 +27,12 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.OpenClawCLIThinking != "low" {
 		t.Fatalf("OpenClawCLIThinking = %q, want %q", cfg.OpenClawCLIThinking, "low")
 	}
+	if !cfg.OpenClawCLIStreaming {
+		t.Fatalf("OpenClawCLIStreaming = false, want true")
+	}
+	if cfg.OpenClawCLIStreamMinChars != 24 {
+		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 24)
+	}
 }
 
 func TestLoadUsesExplicitOpenClawHTTPURL(t *testing.T) {
@@ -102,6 +108,20 @@ func TestLoadRejectsInvalidOpenClawCLIThinking(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "OPENCLAW_CLI_THINKING") {
 		t.Fatalf("Load() error = %v, want OPENCLAW_CLI_THINKING validation error", err)
+	}
+}
+
+func TestLoadRejectsInvalidOpenClawCLIStreamMinChars(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9395")
+	t.Setenv("OPENCLAW_CLI_STREAM_MIN_CHARS", "0")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid OPENCLAW_CLI_STREAM_MIN_CHARS")
+	}
+	if !strings.Contains(err.Error(), "OPENCLAW_CLI_STREAM_MIN_CHARS") {
+		t.Fatalf("Load() error = %v, want OPENCLAW_CLI_STREAM_MIN_CHARS validation error", err)
 	}
 }
 
@@ -185,6 +205,8 @@ func setCoreEnvEmpty(t *testing.T) {
 		"OPENCLAW_HTTP_URL",
 		"OPENCLAW_CLI_PATH",
 		"OPENCLAW_CLI_THINKING",
+		"OPENCLAW_CLI_STREAMING",
+		"OPENCLAW_CLI_STREAM_MIN_CHARS",
 		"OPENCLAW_HTTP_STREAM_STRICT",
 		"DATABASE_URL",
 		"MEMORY_EMBEDDING_DIM",

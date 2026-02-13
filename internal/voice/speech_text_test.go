@@ -40,3 +40,52 @@ func TestSanitizeSpeechText(t *testing.T) {
 		})
 	}
 }
+
+func TestBridgeSpeechDelta(t *testing.T) {
+	cases := []struct {
+		name        string
+		rawDelta    string
+		sanitized   string
+		alreadySent bool
+		want        string
+	}{
+		{
+			name:        "prepends space for continuing word chunk",
+			rawDelta:    " world",
+			sanitized:   "world",
+			alreadySent: true,
+			want:        " world",
+		},
+		{
+			name:        "no prepend on first chunk",
+			rawDelta:    " world",
+			sanitized:   "world",
+			alreadySent: false,
+			want:        "world",
+		},
+		{
+			name:        "no prepend when sanitized starts with punctuation",
+			rawDelta:    " !",
+			sanitized:   "!",
+			alreadySent: true,
+			want:        "!",
+		},
+		{
+			name:        "no prepend when raw delta has no leading whitespace",
+			rawDelta:    "world",
+			sanitized:   "world",
+			alreadySent: true,
+			want:        "world",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := bridgeSpeechDelta(tc.rawDelta, tc.sanitized, tc.alreadySent)
+			if got != tc.want {
+				t.Fatalf("bridgeSpeechDelta(%q, %q, %v) = %q, want %q", tc.rawDelta, tc.sanitized, tc.alreadySent, got, tc.want)
+			}
+		})
+	}
+}

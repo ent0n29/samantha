@@ -54,10 +54,11 @@ type Orchestrator struct {
 }
 
 const (
-	memoryContextLimit   = 8
-	memoryContextTimeout = 350 * time.Millisecond
-	memorySaveTimeout    = 2 * time.Second
-	ttsFinalizeTimeout   = 10 * time.Second
+	memoryContextLimit    = 8
+	memoryContextTimeout  = 350 * time.Millisecond
+	memoryContextSoftWait = 120 * time.Millisecond
+	memorySaveTimeout     = 2 * time.Second
+	ttsFinalizeTimeout    = 10 * time.Second
 )
 
 func NewOrchestrator(
@@ -685,41 +686,76 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	})
 
 	settings := ttsSettingsForProfile(profile)
-	var (
-		preflightWG    sync.WaitGroup
-		ttsStream      TTSStream
-		ttsErr         error
-		ttsReadyAt     time.Time
-		recent         []memory.TurnRecord
-		recentErr      error
-		contextReadyAt time.Time
-	)
-	preflightWG.Add(2)
-	go func() {
-		defer preflightWG.Done()
-		ttsStream, ttsErr = o.ttsProvider.StartStream(ctx, profile.VoiceID, profile.ModelID, settings)
-		ttsReadyAt = time.Now()
-	}()
-	go func() {
-		defer preflightWG.Done()
-		if o.memoryStore == nil {
-			contextReadyAt = time.Now()
-			return
-		}
-		recentCtx, cancel := context.WithTimeout(ctx, memoryContextTimeout)
-		defer cancel()
-		recent, recentErr = o.memoryStore.RecentContext(recentCtx, s.UserID, memoryContextLimit)
-		contextReadyAt = time.Now()
-	}()
-	preflightWG.Wait()
+	type ttsPreflightResult struct {
+		stream  TTSStream
+		err     error
+		readyAt time.Time
+	}
+	type memoryPreflightResult struct {
+		recent  []memory.TurnRecord
+		err     error
+		readyAt time.Time
+	}
 
-	if !ttsReadyAt.IsZero() {
-		if d := ttsReadyAt.Sub(committedAt); d > 0 {
+	ttsResCh := make(chan ttsPreflightResult, 1)
+	go func() {
+		stream, err := o.ttsProvider.StartStream(ctx, profile.VoiceID, profile.ModelID, settings)
+		ttsResCh <- ttsPreflightResult{
+			stream:  stream,
+			err:     err,
+			readyAt: time.Now(),
+		}
+	}()
+
+	memResCh := make(chan memoryPreflightResult, 1)
+	memReady := o.memoryStore == nil
+	memRes := memoryPreflightResult{readyAt: time.Now()}
+	memCancel := func() {}
+	if o.memoryStore != nil {
+		memCtx, cancel := context.WithTimeout(ctx, memoryContextTimeout)
+		memCancel = cancel
+		go func() {
+			defer cancel()
+			recent, err := o.memoryStore.RecentContext(memCtx, s.UserID, memoryContextLimit)
+			memResCh <- memoryPreflightResult{
+				recent:  recent,
+				err:     err,
+				readyAt: time.Now(),
+			}
+		}()
+	}
+
+	ttsRes := <-ttsResCh
+	ttsStream := ttsRes.stream
+	ttsErr := ttsRes.err
+	if !ttsRes.readyAt.IsZero() {
+		if d := ttsRes.readyAt.Sub(committedAt); d > 0 {
 			o.metrics.ObserveTurnStage("commit_to_tts_ready", d)
 		}
 	}
-	if !contextReadyAt.IsZero() {
-		if d := contextReadyAt.Sub(committedAt); d > 0 {
+
+	if o.memoryStore != nil {
+		waitBudget := memoryContextSoftWait - time.Since(committedAt)
+		if waitBudget < 0 {
+			waitBudget = 0
+		}
+		timer := time.NewTimer(waitBudget)
+		select {
+		case memRes = <-memResCh:
+			memReady = true
+		case <-timer.C:
+			memCancel()
+			o.metrics.SessionEvents.WithLabelValues("memory_context_skipped").Inc()
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	if memReady && !memRes.readyAt.IsZero() {
+		if d := memRes.readyAt.Sub(committedAt); d > 0 {
 			o.metrics.ObserveTurnStage("commit_to_context_ready", d)
 		}
 	}
@@ -727,8 +763,8 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	if ttsErr != nil {
 		return fmt.Errorf("start tts stream: %w", ttsErr)
 	}
-	if recentErr != nil && !errors.Is(recentErr, context.Canceled) {
-		if errors.Is(recentErr, context.DeadlineExceeded) {
+	if memReady && memRes.err != nil && !errors.Is(memRes.err, context.Canceled) {
+		if errors.Is(memRes.err, context.DeadlineExceeded) {
 			o.metrics.SessionEvents.WithLabelValues("memory_context_timeout").Inc()
 		} else {
 			o.metrics.SessionEvents.WithLabelValues("memory_context_error").Inc()
@@ -736,6 +772,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	}
 	defer ttsStream.Close()
 
+	recent := memRes.recent
 	contextLines := make([]string, 0, len(recent))
 	for _, r := range recent {
 		contextLines = append(contextLines, fmt.Sprintf("%s: %s", r.Role, r.Content))
@@ -815,12 +852,12 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 				Type:      protocol.TypeSystemEvent,
 				SessionID: s.ID,
 				Code:      "assistant_working",
-				Detail:    "Thinking...",
 			})
 		}
 	}()
 
 	var assistantOut string
+	leadFilter := newLeadResponseFilter()
 	res, err := o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
 		UserID:        s.UserID,
 		SessionID:     s.ID,
@@ -829,6 +866,10 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		MemoryContext: contextLines,
 		PersonaID:     profile.ID,
 	}, func(delta string) error {
+		delta = leadFilter.Consume(delta)
+		if strings.TrimSpace(delta) == "" {
+			return nil
+		}
 		assistantOut += delta
 		if !firstTextObserved && strings.TrimSpace(delta) != "" {
 			firstTextObserved = true
@@ -845,6 +886,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		if speechDelta == "" {
 			return nil
 		}
+		speechDelta = bridgeSpeechDelta(delta, speechDelta, speechSent)
 		speechSent = true
 		return ttsStream.SendText(ctx, speechDelta, true)
 	})
@@ -853,7 +895,10 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		return fmt.Errorf("stream response: %w", err)
 	}
 	if assistantOut == "" {
-		assistantOut = res.Text
+		assistantOut = leadFilter.Finalize(res.Text)
+		if assistantOut == "" {
+			assistantOut = strings.TrimSpace(res.Text)
+		}
 		if assistantOut != "" {
 			if !firstTextObserved && strings.TrimSpace(assistantOut) != "" {
 				firstTextObserved = true

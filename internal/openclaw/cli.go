@@ -1,25 +1,31 @@
 package openclaw
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 )
 
 // CLIAdapter executes the OpenClaw CLI and extracts a textual reply.
 type CLIAdapter struct {
-	binaryPath string
-	thinking   string
+	binaryPath     string
+	thinking       string
+	streaming      bool
+	streamMinChars int
 }
 
-func NewCLIAdapter(binaryPath, thinking string) *CLIAdapter {
+func NewCLIAdapter(binaryPath, thinking string, streaming bool, streamMinChars int) *CLIAdapter {
 	return &CLIAdapter{
-		binaryPath: strings.TrimSpace(binaryPath),
-		thinking:   normalizeThinkingLevel(thinking),
+		binaryPath:     strings.TrimSpace(binaryPath),
+		thinking:       normalizeThinkingLevel(thinking),
+		streaming:      streaming,
+		streamMinChars: normalizeStreamMinChars(streamMinChars),
 	}
 }
 
@@ -32,8 +38,37 @@ func (a *CLIAdapter) StreamResponse(
 	if sessionID == "" {
 		sessionID = "samantha"
 	}
+	args := a.buildArgs(buildPrompt(req), sessionID)
+	if a.streaming {
+		return a.streamResponseIncremental(ctx, args, onDelta)
+	}
+	return a.streamResponseBuffered(ctx, args, onDelta)
+}
 
-	prompt := buildPrompt(req)
+func normalizeThinkingLevel(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "minimal":
+		return "minimal"
+	case "low":
+		return "low"
+	case "high":
+		return "high"
+	default:
+		return "medium"
+	}
+}
+
+func normalizeStreamMinChars(raw int) int {
+	if raw <= 0 {
+		return 24
+	}
+	if raw > 2048 {
+		return 2048
+	}
+	return raw
+}
+
+func (a *CLIAdapter) buildArgs(prompt, sessionID string) []string {
 	args := []string{
 		"agent",
 		"--local",
@@ -53,10 +88,17 @@ func (a *CLIAdapter) StreamResponse(
 		"--thinking",
 		a.thinking,
 	)
+	return args
+}
 
+func (a *CLIAdapter) streamResponseBuffered(
+	ctx context.Context,
+	args []string,
+	onDelta DeltaHandler,
+) (MessageResponse, error) {
 	cmd := exec.CommandContext(ctx, a.binaryPath, args...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	var stdout strings.Builder
+	var stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
@@ -84,21 +126,145 @@ func (a *CLIAdapter) StreamResponse(
 			return MessageResponse{}, err
 		}
 	}
-
 	return MessageResponse{Text: text}, nil
 }
 
-func normalizeThinkingLevel(raw string) string {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "minimal":
-		return "minimal"
-	case "low":
-		return "low"
-	case "high":
-		return "high"
-	default:
-		return "medium"
+func (a *CLIAdapter) streamResponseIncremental(
+	ctx context.Context,
+	args []string,
+	onDelta DeltaHandler,
+) (MessageResponse, error) {
+	cmd := exec.CommandContext(ctx, a.binaryPath, args...)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return MessageResponse{}, fmt.Errorf("openclaw cli stdout pipe: %w", err)
 	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return MessageResponse{}, fmt.Errorf("openclaw cli stderr pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return MessageResponse{}, fmt.Errorf("openclaw cli start: %w", err)
+	}
+
+	chunks := make(chan []byte, 24)
+	readErrCh := make(chan error, 1)
+	go streamReadChunks(stdoutPipe, chunks, readErrCh)
+
+	var (
+		stderrMu sync.Mutex
+		stderrSB strings.Builder
+	)
+	stderrErrCh := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(&lockedWriter{mu: &stderrMu, sb: &stderrSB}, stderrPipe)
+		stderrErrCh <- copyErr
+	}()
+
+	var stdoutFull strings.Builder
+	collector := newCLIStreamCollector(a.streamMinChars)
+
+	for chunk := range chunks {
+		stdoutFull.Write(chunk)
+		if onDelta == nil {
+			continue
+		}
+		for _, delta := range collector.ConsumeChunk(chunk) {
+			if strings.TrimSpace(delta) == "" {
+				continue
+			}
+			if err := onDelta(delta); err != nil {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				_ = cmd.Wait()
+				return MessageResponse{}, err
+			}
+		}
+	}
+	if readErr := <-readErrCh; readErr != nil {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		_ = cmd.Wait()
+		return MessageResponse{}, fmt.Errorf("openclaw cli stdout read: %w", readErr)
+	}
+
+	waitErr := cmd.Wait()
+	if stderrErr := <-stderrErrCh; stderrErr != nil {
+		return MessageResponse{}, fmt.Errorf("openclaw cli stderr read: %w", stderrErr)
+	}
+
+	stderrMu.Lock()
+	stderrText := strings.TrimSpace(stderrSB.String())
+	stderrMu.Unlock()
+	stdoutText := stdoutFull.String()
+
+	finalText := parseCLIReply(stdoutText)
+	if finalText == "" {
+		finalText = strings.TrimSpace(stdoutText)
+	}
+
+	remaining := collector.Finalize(finalText)
+	if onDelta != nil {
+		for _, delta := range remaining {
+			if strings.TrimSpace(delta) == "" {
+				continue
+			}
+			if err := onDelta(delta); err != nil {
+				return MessageResponse{}, err
+			}
+		}
+	}
+
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return MessageResponse{}, ctx.Err()
+		}
+		errText := stderrText
+		if errText == "" {
+			errText = strings.TrimSpace(stdoutText)
+		}
+		if errText != "" {
+			return MessageResponse{}, fmt.Errorf("openclaw cli failed: %w: %s", waitErr, errText)
+		}
+		return MessageResponse{}, fmt.Errorf("openclaw cli failed: %w", waitErr)
+	}
+
+	return MessageResponse{Text: finalText}, nil
+}
+
+func streamReadChunks(r io.Reader, chunks chan<- []byte, errCh chan<- error) {
+	defer close(chunks)
+	reader := bufio.NewReaderSize(r, 64*1024)
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			out := make([]byte, n)
+			copy(out, buf[:n])
+			chunks <- out
+		}
+		if err != nil {
+			if err == io.EOF {
+				errCh <- nil
+				return
+			}
+			errCh <- err
+			return
+		}
+	}
+}
+
+type lockedWriter struct {
+	mu *sync.Mutex
+	sb *strings.Builder
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sb.Write(p)
 }
 
 func buildPrompt(req MessageRequest) string {

@@ -72,6 +72,33 @@ func sanitizeSpeechText(raw string) string {
 	return strings.TrimSpace(b.String())
 }
 
+// bridgeSpeechDelta restores an intentional leading space removed by sanitizeSpeechText
+// when a streamed text delta begins with whitespace and continues a word sequence.
+func bridgeSpeechDelta(rawDelta, sanitized string, alreadySent bool) string {
+	if !alreadySent || sanitized == "" {
+		return sanitized
+	}
+	firstRaw, ok := firstRune(rawDelta)
+	if !ok || !unicode.IsSpace(firstRaw) {
+		return sanitized
+	}
+	firstClean, ok := firstRune(sanitized)
+	if !ok {
+		return sanitized
+	}
+	if unicode.IsLetter(firstClean) || unicode.IsDigit(firstClean) {
+		return " " + sanitized
+	}
+	return sanitized
+}
+
+func firstRune(s string) (rune, bool) {
+	for _, r := range s {
+		return r, true
+	}
+	return 0, false
+}
+
 func isSpeechSafePunctuation(r rune) bool {
 	switch r {
 	case '.', ',', '!', '?', ':', ';', '\'', '"', '-', '(', ')':
