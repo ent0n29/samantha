@@ -149,6 +149,11 @@ If `openclaw` is not installed/configured, the server runs with a mock brain.
 ## Performance Loop
 
 - Live latency snapshot API: `GET /v1/perf/latency`
-- Probe script:
+- Generic probe:
   - `make perf-latency`
   - or `INTERVAL_SEC=1 SAMPLES=30 ./scripts/perf_latency_probe.sh http://127.0.0.1:8080`
+- Local-first baseline (recommended for milestone gating):
+  - `make perf-latency-local`
+  - or `FAIL_ON_TARGETS=1 SAMPLES=30 ./scripts/perf_latency_local_baseline.sh http://127.0.0.1:8080`
+  - optionally enforce provider check: `REQUIRE_LOCAL_PROVIDER=1 ...`
+  - default targets: `first_text p95<=550ms`, `first_audio p95<=1400ms`, `turn_total p95<=3200ms`

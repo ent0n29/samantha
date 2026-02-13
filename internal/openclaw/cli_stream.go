@@ -73,7 +73,7 @@ func (c *cliStreamCollector) flush(force bool) []string {
 			threshold = c.firstMin
 		}
 
-		segment, rest, ok := nextCLIStreamSegment(c.pending, threshold, force)
+		segment, rest, ok := nextCLIStreamSegment(c.pending, threshold, c.emitted == "", force)
 		if !ok {
 			break
 		}
@@ -90,7 +90,7 @@ func (c *cliStreamCollector) flush(force bool) []string {
 	return out
 }
 
-func nextCLIStreamSegment(input string, minChars int, force bool) (segment, rest string, ok bool) {
+func nextCLIStreamSegment(input string, minChars int, firstSegment bool, force bool) (segment, rest string, ok bool) {
 	if input == "" {
 		return "", "", false
 	}
@@ -104,13 +104,35 @@ func nextCLIStreamSegment(input string, minChars int, force bool) (segment, rest
 		return seg, rest, true
 	}
 
-	// If we already buffered enough text without punctuation, flush a short chunk
-	// to keep first-text latency and TTS responsiveness low.
-	if len(input) >= minChars+8 {
-		cut := whitespaceCut(input, minChars)
-		seg := input[:cut]
-		rest := input[cut:]
-		return seg, rest, true
+	// If punctuation is delayed, flush a phrase-sized chunk to keep latency low while
+	// avoiding over-fragmented micro-deltas that hurt speech naturalness.
+	extra := 8
+	window := 28
+	minNoPunct := minChars + extra
+	if !firstSegment {
+		extra = 18
+		window = 52
+		minNoPunct = minChars + extra
+	}
+	if len(input) >= minNoPunct {
+		cut := whitespaceCut(input, minChars, window)
+		minSegmentLen := minChars
+		if !firstSegment {
+			minSegmentLen = minChars + 6
+		}
+		if minSegmentLen > len(input) {
+			minSegmentLen = len(input)
+		}
+		if cut < minSegmentLen {
+			cut = whitespaceCut(input, minSegmentLen, window)
+		}
+		if cut < minSegmentLen {
+			cut = minSegmentLen
+		}
+		if cut > len(input) {
+			cut = len(input)
+		}
+		return input[:cut], input[cut:], true
 	}
 	return "", input, false
 }
@@ -128,14 +150,17 @@ func boundaryAfterMin(input string, minChars int) int {
 	return -1
 }
 
-func whitespaceCut(input string, minChars int) int {
+func whitespaceCut(input string, minChars int, window int) int {
 	if minChars < 1 {
 		minChars = 1
+	}
+	if window < 1 {
+		window = 20
 	}
 	if len(input) <= minChars {
 		return len(input)
 	}
-	limit := minChars + 20
+	limit := minChars + window
 	if limit > len(input) {
 		limit = len(input)
 	}

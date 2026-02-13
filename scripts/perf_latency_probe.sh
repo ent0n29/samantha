@@ -7,11 +7,13 @@ SAMPLES="${SAMPLES:-0}" # 0 means infinite
 TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS:-400}"
 TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS:-900}"
 TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS:-3500}"
+FAIL_ON_TARGETS="${FAIL_ON_TARGETS:-0}"
 
 count=0
 
 echo "Latency probe -> ${BASE_URL}/v1/perf/latency (interval=${INTERVAL_SEC}s samples=${SAMPLES:-0})"
 echo "Targets: first_text_p95<=${TARGET_FIRST_TEXT_P95_MS}ms first_audio_p95<=${TARGET_FIRST_AUDIO_P95_MS}ms turn_total_p95<=${TARGET_TURN_TOTAL_P95_MS}ms"
+echo "Fail on target breach: ${FAIL_ON_TARGETS}"
 
 while true; do
   now="$(date '+%H:%M:%S')"
@@ -19,7 +21,7 @@ while true; do
   if [[ -z "${json}" ]]; then
     echo "[${now}] fetch failed"
   else
-    JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$now" <<'PY'
+    JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$now" "$FAIL_ON_TARGETS" <<'PY'
 import json
 import os
 import sys
@@ -28,6 +30,7 @@ target_text = float(sys.argv[1])
 target_audio = float(sys.argv[2])
 target_total = float(sys.argv[3])
 now = sys.argv[4]
+fail_on_targets = str(sys.argv[5]).strip().lower() in ("1", "true", "yes", "on")
 
 try:
     payload = json.loads(os.environ.get("JSON_PAYLOAD", "{}"))
@@ -41,24 +44,32 @@ for item in payload.get("stages", []):
     if stage:
         stages[stage] = item
 
-def stage_line(name, target):
+def stage_eval(name, target):
     item = stages.get(name)
     if not item:
-        return f"{name}: n/a"
+        return f"{name}: n/a", False
     p95 = float(item.get("p95_ms", 0) or 0)
     p50 = float(item.get("p50_ms", 0) or 0)
     samples = int(item.get("samples", 0) or 0)
-    status = "ok" if p95 <= target else "slow"
-    return f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms n={samples} target={target:.0f} [{status}]"
+    if samples <= 0:
+        return f"{name}: n/a", False
+    slow = p95 > target
+    status = "ok" if not slow else "slow"
+    return f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms n={samples} target={target:.0f} [{status}]", slow
 
+line_text, fail_text = stage_eval("commit_to_first_text", target_text)
+line_audio, fail_audio = stage_eval("commit_to_first_audio", target_audio)
+line_total, fail_total = stage_eval("turn_total", target_total)
 print(
     f"[{now}] "
-    + stage_line("commit_to_first_text", target_text)
+    + line_text
     + " | "
-    + stage_line("commit_to_first_audio", target_audio)
+    + line_audio
     + " | "
-    + stage_line("turn_total", target_total)
+    + line_total
 )
+if fail_on_targets and (fail_text or fail_audio or fail_total):
+    raise SystemExit(2)
 PY
   fi
 

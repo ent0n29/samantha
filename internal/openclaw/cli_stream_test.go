@@ -108,7 +108,7 @@ func TestCLIStreamCollectorFirstMinTunedForLatency(t *testing.T) {
 
 func TestNextCLIStreamSegmentFlushesSoonerWithoutPunctuation(t *testing.T) {
 	input := "alpha beta gamma delta zeta"
-	segment, rest, ok := nextCLIStreamSegment(input, 16, false)
+	segment, rest, ok := nextCLIStreamSegment(input, 16, true, false)
 	if !ok {
 		t.Fatalf("nextCLIStreamSegment() = no segment, want early flush")
 	}
@@ -117,5 +117,44 @@ func TestNextCLIStreamSegmentFlushesSoonerWithoutPunctuation(t *testing.T) {
 	}
 	if segment+rest != input {
 		t.Fatalf("segment+rest mismatch: %q + %q != %q", segment, rest, input)
+	}
+}
+
+func TestNextCLIStreamSegmentWaitsForMoreWhenNoPunctuationAndTooShort(t *testing.T) {
+	input := "alpha beta gamma"
+	segment, rest, ok := nextCLIStreamSegment(input, 16, true, false)
+	if ok {
+		t.Fatalf("nextCLIStreamSegment() emitted %q, want no segment", segment)
+	}
+	if rest != input {
+		t.Fatalf("rest = %q, want %q", rest, input)
+	}
+}
+
+func TestNextCLIStreamSegmentAvoidsTinyChunksAfterFirstSegment(t *testing.T) {
+	input := " and this keeps flowing without punctuation for a while"
+	segment, rest, ok := nextCLIStreamSegment(input, 16, false, false)
+	if !ok {
+		t.Fatalf("nextCLIStreamSegment() = no segment, want segment")
+	}
+	if len(segment) < 22 {
+		t.Fatalf("segment len = %d, want >= 22 for non-first segment", len(segment))
+	}
+	if segment+rest != input {
+		t.Fatalf("segment+rest mismatch: %q + %q != %q", segment, rest, input)
+	}
+}
+
+func TestNextCLIStreamSegmentPrefersPunctuationBoundary(t *testing.T) {
+	input := "alpha beta gamma. next sentence continues"
+	segment, rest, ok := nextCLIStreamSegment(input, 16, false, false)
+	if !ok {
+		t.Fatalf("nextCLIStreamSegment() = no segment, want punctuation segment")
+	}
+	if segment != "alpha beta gamma." {
+		t.Fatalf("segment = %q, want %q", segment, "alpha beta gamma.")
+	}
+	if rest != " next sentence continues" {
+		t.Fatalf("rest = %q, want %q", rest, " next sentence continues")
 	}
 }
