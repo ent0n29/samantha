@@ -1,6 +1,13 @@
 # Samantha
 
+Talk to your computer like you talk to a friend, and let your agents build.
+
 Voice-first companion UI for OpenClaw (inspired by *Her*). Local-first and Apple Silicon friendly.
+
+<div align="center">
+  <video src="./docs/media/sam.mp4" controls muted loop playsinline width="860"></video>
+  <p><a href="./docs/media/sam.mp4">If the embedded player does not render, open the clip directly.</a></p>
+</div>
 
 Samantha is a small Go HTTP/WebSocket server plus a browser UI that does:
 

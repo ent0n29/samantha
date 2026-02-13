@@ -27,6 +27,11 @@ const VAD_MAX_ZCR = 0.25; // zero-crossing rate (0..1). Higher tends to be noise
 const VAD_MAX_CREST = 25; // peak/rms. Very high tends to be impulse noise (keyboard clicks).
 const VAD_ATTACK_FRAMES = 3; // ~190-260ms depending capture frame size; prevents click triggers.
 const VAD_RELEASE_FRAMES = 6; // ~450-520ms hangover before auto-commit.
+const VAD_RELEASE_FRAMES_SHORT = 4; // short utterances can commit faster without sounding clipped.
+const VAD_SHORT_UTTERANCE_MS = 1500;
+const VAD_AUTO_COMMIT_SILENCE_MS = 430;
+const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 320;
+const VAD_AUTO_COMMIT_COOLDOWN_MS = 900;
 
 const state = {
   sessionId: "",
@@ -61,6 +66,7 @@ const state = {
   energy: 0,
 
   reconnectTimer: null,
+  reconnectInFlight: false,
   reconnectBackoffMs: 250,
   allowReconnect: true,
   lastTurnID: "",
@@ -95,6 +101,7 @@ const state = {
   vadSpeechFrames: 0,
   vadSilenceFrames: 0,
   vadStreaming: false,
+  vadSpeechStartMs: 0,
   vadPreroll: [],
   vadPrerollBytes: 0,
 
@@ -409,6 +416,9 @@ function wireUI() {
     }
     if (el.debug && !el.debug.classList.contains("hidden")) {
       startPerfPolling();
+    }
+    if (state.allowReconnect && !state.connected) {
+      void reconnectFlow();
     }
   });
 }
@@ -971,13 +981,16 @@ function maybeAutoCommit() {
     return;
   }
   const now = Date.now();
+  const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
+  const silenceTargetMs =
+    utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? VAD_AUTO_COMMIT_SILENCE_SHORT_MS : VAD_AUTO_COMMIT_SILENCE_MS;
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
-  if (silenceMs < 430) {
+  if (silenceMs < silenceTargetMs) {
     return;
   }
   // Avoid spamming commit during long silences.
-  if (now - state.lastAutoCommitAtMs < 900) {
+  if (now - state.lastAutoCommitAtMs < VAD_AUTO_COMMIT_COOLDOWN_MS) {
     return;
   }
 
@@ -986,6 +999,7 @@ function maybeAutoCommit() {
   state.vadStreaming = false;
   state.vadSpeechFrames = 0;
   state.vadSilenceFrames = 0;
+  state.vadSpeechStartMs = 0;
   clearVADPreroll();
   sendControl("stop");
 }
@@ -1073,7 +1087,7 @@ async function connect() {
   )}`;
 
   state.allowReconnect = true;
-  setPresence("connected", "Samantha", "Ready.");
+  setPresence("connected", "Samantha", "Connecting…");
 
   const ws = new WebSocket(wsURL);
   state.ws = ws;
@@ -1100,8 +1114,13 @@ async function connect() {
     state.bargeInActive = false;
     state.bargeInFrames = 0;
     clearBargePreroll();
-    if (state.allowReconnect && !document.hidden) {
-      scheduleReconnect();
+    if (state.allowReconnect) {
+      if (document.hidden) {
+        setPresence("connected", "Samantha", "Reconnecting when visible…");
+      } else {
+        setPresence("connected", "Samantha", "Reconnecting…");
+        scheduleReconnect();
+      }
     }
     logEvent("ws disconnected");
   });
@@ -1129,28 +1148,76 @@ function scheduleReconnect() {
 }
 
 async function reconnectFlow() {
+  if (state.reconnectInFlight) {
+    return;
+  }
+  if (!state.allowReconnect) {
+    return;
+  }
+  state.reconnectInFlight = true;
   const priorSessionID = (state.sessionId || "").trim();
+  let lastErr = null;
   try {
+    if (!state.allowReconnect) {
+      return;
+    }
     if (!priorSessionID) {
       await createSession();
     }
+    if (!state.allowReconnect) {
+      return;
+    }
     await connect();
   } catch (err) {
+    if (!state.allowReconnect) {
+      return;
+    }
+    lastErr = err;
     if (priorSessionID) {
       try {
+        if (!state.allowReconnect) {
+          return;
+        }
         await createSession();
+        if (!state.allowReconnect) {
+          return;
+        }
         await connect();
         return;
-      } catch (_fallbackErr) {
+      } catch (fallbackErr) {
         // fall through to retry schedule below.
+        lastErr = fallbackErr || err;
       }
     }
-    setPresence("error", "Samantha", stringifyError(err));
+    if (isTransientReconnectError(lastErr)) {
+      setPresence("connected", "Samantha", "Reconnecting…");
+    } else {
+      setPresence("error", "Samantha", stringifyError(lastErr));
+    }
     markTaskDeskSyncState("degraded");
     state.taskDesk.metrics.task_bootstrap_error += 1;
     renderTaskDesk();
-    scheduleReconnect();
+    if (state.allowReconnect) {
+      scheduleReconnect();
+    }
+  } finally {
+    state.reconnectInFlight = false;
   }
+}
+
+function isTransientReconnectError(err) {
+  const msg = stringifyError(err).toLowerCase();
+  if (!msg) {
+    return false;
+  }
+  return (
+    msg.includes("websocket") ||
+    msg.includes("networkerror") ||
+    msg.includes("network error") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("timeout") ||
+    msg.includes("closed before open")
+  );
 }
 
 function waitForWSOpen(ws, timeoutMs) {
@@ -1829,6 +1896,7 @@ function resetVAD() {
   state.vadSpeechFrames = 0;
   state.vadSilenceFrames = 0;
   state.vadStreaming = false;
+  state.vadSpeechStartMs = 0;
   clearVADPreroll();
   clearQueuedMicPCM();
 }
@@ -2268,6 +2336,7 @@ function processMicFrame(input, inputSampleRate) {
         state.vadStreaming = true;
         state.vadSpeechFrames = VAD_ATTACK_FRAMES;
         state.vadSilenceFrames = 0;
+        state.vadSpeechStartMs = now;
         state.sawSpeech = true;
         state.lastVoiceAtMs = now;
         clearVADPreroll();
@@ -2307,6 +2376,7 @@ function processMicFrame(input, inputSampleRate) {
     if (state.vadSpeechFrames >= VAD_ATTACK_FRAMES) {
       state.vadStreaming = true;
       state.vadSilenceFrames = 0;
+      state.vadSpeechStartMs = now;
       state.sawSpeech = true;
       state.lastVoiceAtMs = now;
       flushVADPreroll();
@@ -2325,13 +2395,16 @@ function processMicFrame(input, inputSampleRate) {
   queueMicPCM(pcmBytes, now);
   flushQueuedMicPCM(now, false);
 
-  if (!speechLike && state.vadSilenceFrames >= VAD_RELEASE_FRAMES) {
+  const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
+  const releaseFrames = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? VAD_RELEASE_FRAMES_SHORT : VAD_RELEASE_FRAMES;
+  if (!speechLike && state.vadSilenceFrames >= releaseFrames) {
     flushQueuedMicPCM(now, true);
     state.lastAutoCommitAtMs = now;
     state.sawSpeech = false;
     state.vadStreaming = false;
     state.vadSpeechFrames = 0;
     state.vadSilenceFrames = 0;
+    state.vadSpeechStartMs = 0;
     clearVADPreroll();
     sendControl("stop");
   }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -35,6 +36,12 @@ type PersonaProfile struct {
 	VerbosityCap int
 }
 
+type brainPrefetchResult struct {
+	canonicalInput string
+	deltas         []string
+	finalText      string
+}
+
 type Orchestrator struct {
 	sessions       *session.Manager
 	adapter        openclaw.Adapter
@@ -54,11 +61,17 @@ type Orchestrator struct {
 }
 
 const (
-	memoryContextLimit    = 8
-	memoryContextTimeout  = 350 * time.Millisecond
-	memoryContextSoftWait = 120 * time.Millisecond
-	memorySaveTimeout     = 2 * time.Second
-	ttsFinalizeTimeout    = 10 * time.Second
+	memoryContextLimit         = 8
+	memoryContextTimeout       = 350 * time.Millisecond
+	memoryContextSoftWait      = 120 * time.Millisecond
+	memoryContextPrefetchFresh = 2 * time.Second
+	brainPrefetchFresh         = 3 * time.Second
+	brainPrefetchWaitBudget    = 80 * time.Millisecond
+	brainPrefetchMinCanonical  = 24
+	brainPrefetchMinWords      = 4
+	brainPrefetchStableRepeats = 2
+	memorySaveTimeout          = 2 * time.Second
+	ttsFinalizeTimeout         = 10 * time.Second
 )
 
 func NewOrchestrator(
@@ -248,7 +261,229 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		wakewordEnabled    bool
 		manualArmUntil     time.Time
 		awaitingQueryUntil time.Time
+
+		memPrefetchMu       sync.Mutex
+		memPrefetchRecent   []memory.TurnRecord
+		memPrefetchReadyAt  time.Time
+		memPrefetchInFlight bool
+
+		brainPrefetchMu        sync.Mutex
+		brainPrefetchGen       int64
+		brainPrefetchInFlight  bool
+		brainPrefetchCancel    context.CancelFunc
+		brainPrefetchCanonical string
+		brainPrefetchDone      chan struct{}
+		brainPrefetchResultVal *brainPrefetchResult
+		brainPrefetchReadyAt   time.Time
+
+		partialStableCanonical string
+		partialStableRepeats   int
 	)
+
+	startMemoryPrefetch := func() {
+		if o.memoryStore == nil {
+			return
+		}
+		memPrefetchMu.Lock()
+		if memPrefetchInFlight {
+			memPrefetchMu.Unlock()
+			return
+		}
+		if !memPrefetchReadyAt.IsZero() && time.Since(memPrefetchReadyAt) < memoryContextPrefetchFresh/2 {
+			memPrefetchMu.Unlock()
+			return
+		}
+		memPrefetchInFlight = true
+		memPrefetchMu.Unlock()
+
+		go func(userID string) {
+			recentCtx, cancel := context.WithTimeout(ctx, memoryContextTimeout)
+			defer cancel()
+			recent, err := o.memoryStore.RecentContext(recentCtx, userID, memoryContextLimit)
+			now := time.Now()
+
+			memPrefetchMu.Lock()
+			defer memPrefetchMu.Unlock()
+			memPrefetchInFlight = false
+			if err != nil {
+				return
+			}
+			memPrefetchRecent = append(memPrefetchRecent[:0], recent...)
+			memPrefetchReadyAt = now
+		}(s.UserID)
+	}
+
+	getMemoryPrefetch := func() ([]memory.TurnRecord, time.Time, bool) {
+		if o.memoryStore == nil {
+			return nil, time.Time{}, false
+		}
+		memPrefetchMu.Lock()
+		defer memPrefetchMu.Unlock()
+		if memPrefetchReadyAt.IsZero() {
+			return nil, time.Time{}, false
+		}
+		if time.Since(memPrefetchReadyAt) > memoryContextPrefetchFresh {
+			return nil, time.Time{}, false
+		}
+		out := make([]memory.TurnRecord, len(memPrefetchRecent))
+		copy(out, memPrefetchRecent)
+		return out, memPrefetchReadyAt, true
+	}
+
+	cancelBrainPrefetch := func() {
+		brainPrefetchMu.Lock()
+		cancel := brainPrefetchCancel
+		brainPrefetchInFlight = false
+		brainPrefetchCancel = nil
+		brainPrefetchCanonical = ""
+		brainPrefetchDone = nil
+		brainPrefetchResultVal = nil
+		brainPrefetchReadyAt = time.Time{}
+		brainPrefetchMu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+
+	tryConsumeBrainPrefetch := func(canonical string) *brainPrefetchResult {
+		canonical = strings.TrimSpace(canonical)
+		if canonical == "" {
+			return nil
+		}
+
+		getReady := func() *brainPrefetchResult {
+			brainPrefetchMu.Lock()
+			defer brainPrefetchMu.Unlock()
+			if brainPrefetchResultVal == nil {
+				return nil
+			}
+			if brainPrefetchResultVal.canonicalInput != canonical {
+				return nil
+			}
+			if brainPrefetchReadyAt.IsZero() || time.Since(brainPrefetchReadyAt) > brainPrefetchFresh {
+				return nil
+			}
+			out := &brainPrefetchResult{
+				canonicalInput: brainPrefetchResultVal.canonicalInput,
+				deltas:         append([]string(nil), brainPrefetchResultVal.deltas...),
+				finalText:      brainPrefetchResultVal.finalText,
+			}
+			brainPrefetchResultVal = nil
+			brainPrefetchReadyAt = time.Time{}
+			return out
+		}
+		if ready := getReady(); ready != nil {
+			return ready
+		}
+
+		var done chan struct{}
+		brainPrefetchMu.Lock()
+		if brainPrefetchInFlight && brainPrefetchCanonical == canonical {
+			done = brainPrefetchDone
+		}
+		brainPrefetchMu.Unlock()
+		if done != nil {
+			timer := time.NewTimer(brainPrefetchWaitBudget)
+			select {
+			case <-done:
+			case <-timer.C:
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		return getReady()
+	}
+
+	startBrainPrefetch := func(rawText string, canonical string) {
+		rawText = strings.TrimSpace(rawText)
+		canonical = strings.TrimSpace(canonical)
+		if rawText == "" || !shouldSpeculateBrainCanonical(canonical) {
+			return
+		}
+
+		brainPrefetchMu.Lock()
+		if brainPrefetchInFlight && brainPrefetchCanonical == canonical {
+			brainPrefetchMu.Unlock()
+			return
+		}
+		if brainPrefetchResultVal != nil &&
+			brainPrefetchResultVal.canonicalInput == canonical &&
+			!brainPrefetchReadyAt.IsZero() &&
+			time.Since(brainPrefetchReadyAt) < brainPrefetchFresh {
+			brainPrefetchMu.Unlock()
+			return
+		}
+
+		oldCancel := brainPrefetchCancel
+		brainPrefetchGen++
+		gen := brainPrefetchGen
+		specCtx, specCancel := context.WithCancel(ctx)
+		doneCh := make(chan struct{})
+		brainPrefetchInFlight = true
+		brainPrefetchCancel = specCancel
+		brainPrefetchCanonical = canonical
+		brainPrefetchDone = doneCh
+		brainPrefetchResultVal = nil
+		brainPrefetchReadyAt = time.Time{}
+		brainPrefetchMu.Unlock()
+
+		if oldCancel != nil {
+			oldCancel()
+		}
+
+		recent, _, _ := getMemoryPrefetch()
+		contextLines := make([]string, 0, len(recent))
+		for _, r := range recent {
+			contextLines = append(contextLines, fmt.Sprintf("%s: %s", r.Role, r.Content))
+		}
+		personaID := o.profileForSession(*s).ID
+
+		go func(ctx context.Context, gen int64, canonical, inputText string, done chan struct{}, memoryContext []string, personaID string) {
+			defer close(done)
+			deltas := make([]string, 0, 24)
+			resp, err := o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
+				UserID:        s.UserID,
+				SessionID:     s.ID,
+				TurnID:        "spec-" + uuid.NewString(),
+				InputText:     inputText,
+				MemoryContext: memoryContext,
+				PersonaID:     personaID,
+			}, func(delta string) error {
+				if strings.TrimSpace(delta) != "" {
+					deltas = append(deltas, delta)
+				}
+				return nil
+			})
+
+			ready := &brainPrefetchResult{
+				canonicalInput: canonical,
+				deltas:         deltas,
+				finalText:      strings.TrimSpace(resp.Text),
+			}
+
+			brainPrefetchMu.Lock()
+			defer brainPrefetchMu.Unlock()
+			if brainPrefetchGen != gen || brainPrefetchCanonical != canonical {
+				return
+			}
+			brainPrefetchInFlight = false
+			brainPrefetchCancel = nil
+			if err != nil {
+				return
+			}
+			if len(ready.deltas) == 0 && ready.finalText == "" {
+				return
+			}
+			brainPrefetchResultVal = ready
+			brainPrefetchReadyAt = time.Now()
+		}(specCtx, gen, canonical, rawText, doneCh, contextLines, personaID)
+	}
+
+	startMemoryPrefetch()
 
 	cancelActiveTurn := func(reason string) {
 		turnMu.Lock()
@@ -272,10 +507,12 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 	for {
 		select {
 		case <-ctx.Done():
+			cancelBrainPrefetch()
 			cancelActiveTurn("connection_closed")
 			return nil
 		case msg, ok := <-inbound:
 			if !ok {
+				cancelBrainPrefetch()
 				cancelActiveTurn("connection_closed")
 				return nil
 			}
@@ -423,12 +660,27 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			o.sendTaskEvent(outbound, taskEvt)
 		case evt, ok := <-sttEvents:
 			if !ok {
+				cancelBrainPrefetch()
 				cancelActiveTurn("stt_closed")
 				return nil
 			}
 
 			switch evt.Type {
 			case STTEventPartial:
+				partialText := strings.TrimSpace(evt.Text)
+				if partialText != "" {
+					startMemoryPrefetch()
+					canonical := canonicalizeBrainPrefetchInput(partialText)
+					if canonical == partialStableCanonical {
+						partialStableRepeats++
+					} else {
+						partialStableCanonical = canonical
+						partialStableRepeats = 1
+					}
+					if partialStableRepeats >= brainPrefetchStableRepeats {
+						startBrainPrefetch(partialText, canonical)
+					}
+				}
 				o.send(outbound, protocol.STTPartial{
 					Type:       protocol.TypeSTTPartial,
 					SessionID:  s.ID,
@@ -441,6 +693,8 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				if committedText == "" {
 					continue
 				}
+				partialStableCanonical = ""
+				partialStableRepeats = 0
 
 				o.send(outbound, protocol.STTCommitted{
 					Type:      protocol.TypeSTTCommitted,
@@ -473,6 +727,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Code:      "wake_word",
 								Detail:    "samantha",
 							})
+							cancelBrainPrefetch()
 							continue
 						}
 						awaitingQueryUntil = time.Time{}
@@ -488,6 +743,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					} else {
 						hit, remainder := detectWakeWordCommitted(committedText)
 						if !hit {
+							cancelBrainPrefetch()
 							continue
 						}
 						if strings.TrimSpace(remainder) == "" {
@@ -498,6 +754,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Code:      "wake_word",
 								Detail:    "samantha",
 							})
+							cancelBrainPrefetch()
 							continue
 						}
 						committedText = remainder
@@ -505,6 +762,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 					committedText = strings.TrimSpace(committedText)
 					if committedText == "" {
+						cancelBrainPrefetch()
 						continue
 					}
 				}
@@ -522,6 +780,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Detail:    err.Error(),
 							})
 						}
+						cancelBrainPrefetch()
 						continue
 					}
 					if lowerCommit == "deny task" || lowerCommit == "deny" {
@@ -535,6 +794,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Detail:    err.Error(),
 							})
 						}
+						cancelBrainPrefetch()
 						continue
 					}
 					if lowerCommit == "cancel task" {
@@ -548,6 +808,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Detail:    err.Error(),
 							})
 						}
+						cancelBrainPrefetch()
 						continue
 					}
 
@@ -598,9 +859,14 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							PIIRedacted: ackChanged,
 							CreatedAt:   time.Now().UTC(),
 						})
+						cancelBrainPrefetch()
 						continue
 					}
 				}
+
+				committedCanonical := canonicalizeBrainPrefetchInput(committedText)
+				prefetchedBrain := tryConsumeBrainPrefetch(committedCanonical)
+				cancelBrainPrefetch()
 
 				// V0 is intentionally half-duplex: ignore fresh commits while assistant is talking.
 				turnMu.Lock()
@@ -615,6 +881,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 				turnID := uuid.NewString()
 				committedAt := time.Now()
+				prefetchedRecent, prefetchedReadyAt, prefetchedReady := getMemoryPrefetch()
 				_ = o.sessions.StartTurn(s.ID, turnID)
 				turnCtx, cancel := context.WithCancel(ctx)
 
@@ -626,7 +893,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				activeToken = token
 				turnMu.Unlock()
 
-				go func(turnText, turnID string, token int64, committedAt time.Time) {
+				go func(turnText, turnID string, token int64, committedAt time.Time, prefetchedRecent []memory.TurnRecord, prefetchedReadyAt time.Time, prefetchedReady bool, prefetchedBrain *brainPrefetchResult) {
 					defer func() {
 						turnMu.Lock()
 						if activeToken == token {
@@ -637,7 +904,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 						turnMu.Unlock()
 					}()
 
-					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, committedAt, outbound); err != nil {
+					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, committedAt, prefetchedRecent, prefetchedReadyAt, prefetchedReady, prefetchedBrain, outbound); err != nil {
 						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 							return
 						}
@@ -650,7 +917,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							Detail:    err.Error(),
 						})
 					}
-				}(committedText, turnID, token, committedAt)
+				}(committedText, turnID, token, committedAt, prefetchedRecent, prefetchedReadyAt, prefetchedReady, prefetchedBrain)
 			case STTEventError:
 				if evt.Code == "commit_throttled" {
 					// Non-fatal: happens when commit is requested with too little uncommitted audio.
@@ -670,7 +937,17 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 	}
 }
 
-func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, userText, turnID string, committedAt time.Time, outbound chan<- any) error {
+func (o *Orchestrator) runAssistantTurn(
+	ctx context.Context,
+	s session.Session,
+	userText, turnID string,
+	committedAt time.Time,
+	prefetchedRecent []memory.TurnRecord,
+	prefetchedReadyAt time.Time,
+	prefetchedReady bool,
+	prefetchedBrain *brainPrefetchResult,
+	outbound chan<- any,
+) error {
 	start := time.Now()
 	profile := o.profileForSession(s)
 
@@ -708,10 +985,26 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 	}()
 
 	memResCh := make(chan memoryPreflightResult, 1)
-	memReady := o.memoryStore == nil
+	skipMemoryForPrefetchedBrain := prefetchedBrain != nil
+	memReady := o.memoryStore == nil || skipMemoryForPrefetchedBrain
 	memRes := memoryPreflightResult{readyAt: time.Now()}
+	if skipMemoryForPrefetchedBrain {
+		o.metrics.SessionEvents.WithLabelValues("memory_context_skipped_prefetched_brain").Inc()
+	} else if prefetchedReady {
+		memReady = true
+		memRes = memoryPreflightResult{
+			recent:  prefetchedRecent,
+			readyAt: prefetchedReadyAt,
+		}
+		if memRes.readyAt.IsZero() {
+			memRes.readyAt = time.Now()
+		}
+		o.metrics.SessionEvents.WithLabelValues("memory_context_prefetch_hit").Inc()
+	} else if o.memoryStore != nil {
+		o.metrics.SessionEvents.WithLabelValues("memory_context_prefetch_miss").Inc()
+	}
 	memCancel := func() {}
-	if o.memoryStore != nil {
+	if o.memoryStore != nil && !memReady {
 		memCtx, cancel := context.WithTimeout(ctx, memoryContextTimeout)
 		memCancel = cancel
 		go func() {
@@ -734,7 +1027,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		}
 	}
 
-	if o.memoryStore != nil {
+	if o.memoryStore != nil && !prefetchedReady && !skipMemoryForPrefetchedBrain {
 		waitBudget := memoryContextSoftWait - time.Since(committedAt)
 		if waitBudget < 0 {
 			waitBudget = 0
@@ -858,14 +1151,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 
 	var assistantOut string
 	leadFilter := newLeadResponseFilter()
-	res, err := o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
-		UserID:        s.UserID,
-		SessionID:     s.ID,
-		TurnID:        turnID,
-		InputText:     userText,
-		MemoryContext: contextLines,
-		PersonaID:     profile.ID,
-	}, func(delta string) error {
+	handleDelta := func(delta string) error {
 		delta = leadFilter.Consume(delta)
 		if strings.TrimSpace(delta) == "" {
 			return nil
@@ -889,10 +1175,35 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		speechDelta = bridgeSpeechDelta(delta, speechDelta, speechSent)
 		speechSent = true
 		return ttsStream.SendText(ctx, speechDelta, true)
-	})
-	if err != nil {
-		_ = ttsStream.CloseInput(ctx)
-		return fmt.Errorf("stream response: %w", err)
+	}
+
+	var (
+		res openclaw.MessageResponse
+		err error
+	)
+	if prefetchedBrain != nil {
+		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_hit").Inc()
+		for _, delta := range prefetchedBrain.deltas {
+			if err := handleDelta(delta); err != nil {
+				_ = ttsStream.CloseInput(ctx)
+				return err
+			}
+		}
+		res = openclaw.MessageResponse{Text: prefetchedBrain.finalText}
+	} else {
+		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_miss").Inc()
+		res, err = o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
+			UserID:        s.UserID,
+			SessionID:     s.ID,
+			TurnID:        turnID,
+			InputText:     userText,
+			MemoryContext: contextLines,
+			PersonaID:     profile.ID,
+		}, handleDelta)
+		if err != nil {
+			_ = ttsStream.CloseInput(ctx)
+			return fmt.Errorf("stream response: %w", err)
+		}
 	}
 	if assistantOut == "" {
 		assistantOut = leadFilter.Finalize(res.Text)
@@ -1266,4 +1577,40 @@ func detectWakeWordCommitted(text string) (bool, string) {
 		return false, ""
 	}
 	return true, strings.TrimSpace(m[1])
+}
+
+func canonicalizeBrainPrefetchInput(raw string) string {
+	var b strings.Builder
+	b.Grow(len(raw))
+
+	prevSpace := true
+	for _, r := range strings.ToLower(raw) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsNumber(r):
+			b.WriteRune(r)
+			prevSpace = false
+		case unicode.IsSpace(r) || unicode.IsPunct(r):
+			if !prevSpace {
+				b.WriteByte(' ')
+				prevSpace = true
+			}
+		default:
+			// Ignore symbols/emoji for matching.
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+func shouldSpeculateBrainCanonical(canonical string) bool {
+	canonical = strings.TrimSpace(canonical)
+	if len(canonical) < brainPrefetchMinCanonical {
+		return false
+	}
+	words := 1
+	for i := 0; i < len(canonical); i++ {
+		if canonical[i] == ' ' {
+			words++
+		}
+	}
+	return words >= brainPrefetchMinWords
 }
