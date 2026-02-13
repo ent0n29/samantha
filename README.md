@@ -85,7 +85,6 @@ flowchart LR
   style Brain fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
   style Storage fill:transparent,stroke:#2f4f73,color:#8ecbff,stroke-width:1.5px;
 
-  linkStyle default stroke:#4b6b8f,stroke-width:1.2px,color:#c7d7e8;
 ```
 
 ## Quickstart (macOS)
