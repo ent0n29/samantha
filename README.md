@@ -5,9 +5,14 @@ Talk to your computer like you talk to a friend, and let your agents build.
 Voice-first companion UI for OpenClaw. Local-first and Apple Silicon friendly.
 
 <div align="center">
-  <!-- GitHub strips repo-file <video> embeds in README rendering.
-       Use a GitHub user-attachments URL if you want an inline video player. -->
-  <img src="./docs/media/sam.mp4.png" alt="Samantha demo preview" width="640" />
+  <a href="https://github.com/user-attachments/assets/fc4b9a07-c74e-4ac4-92c5-3c2b41ea2361">
+    <img src="./docs/media/sam.gif" alt="Samantha demo preview" width="640" />
+  </a>
+  <p>
+    <a href="https://github.com/user-attachments/assets/fc4b9a07-c74e-4ac4-92c5-3c2b41ea2361">
+      Watch the full demo clip
+    </a>
+  </p>
   <p><strong>Build by voice. Ship at thought speed.</strong></p>
 </div>
 
