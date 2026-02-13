@@ -63,3 +63,39 @@ func TestStripAssistantLeadFillerDoesNotStripSecondChance(t *testing.T) {
 		t.Fatalf("stripAssistantLeadFiller() = %q, want %q", got, want)
 	}
 }
+
+func TestLeadResponseFilterStripsAcknowledgementThenFiller(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("Sure, give me a second while I think. We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
+func TestLeadResponseFilterStripsSplitAcknowledgementThenFiller(t *testing.T) {
+	f := newLeadResponseFilter()
+	if got := f.Consume("Sure,"); got != "" {
+		t.Fatalf("Consume(part1) = %q, want empty", got)
+	}
+	if got := f.Consume(" give me a sec"); got != "" {
+		t.Fatalf("Consume(part2) = %q, want empty", got)
+	}
+	if got := f.Consume("ond while I think."); got != "" {
+		t.Fatalf("Consume(part3) = %q, want empty", got)
+	}
+	got := f.Consume(" Let's do it.")
+	want := "Let's do it."
+	if got != want {
+		t.Fatalf("Consume(part4) = %q, want %q", got, want)
+	}
+}
+
+func TestLeadResponseFilterKeepsAcknowledgementWithoutFiller(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("Sure, let's do it now.")
+	want := "Sure, let's do it now."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}

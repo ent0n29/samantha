@@ -437,11 +437,11 @@ func (s *localTTSStream) SendText(_ context.Context, text string, tryTrigger boo
 	if !s.closed {
 		s.pending += text
 		if tryTrigger {
-			minChars := 36
+			minChars := 28
 			if s.segmentsOut == 0 {
-				minChars = 18
+				minChars = 12
 			}
-			ready, s.pending = splitTTSReadySegments(s.pending, minChars, 200)
+			ready, s.pending = splitTTSReadySegments(s.pending, minChars, 180)
 		}
 	}
 	s.mu.Unlock()
@@ -602,6 +602,20 @@ func splitTTSReadySegments(text string, minChars, maxChars int) ([]string, strin
 			}
 			if cut < 0 {
 				cut = limit
+			}
+		}
+
+		// Keep first-audio latency low: if we already buffered enough characters and
+		// still have no punctuation boundary, flush a short phrase-sized segment.
+		if cut < 0 && len(rest) >= minChars+18 {
+			fallbackLimit := minChars + 28
+			if fallbackLimit > len(rest) {
+				fallbackLimit = len(rest)
+			}
+			if ws := strings.IndexAny(rest[minChars:fallbackLimit], " \t\n"); ws >= 0 {
+				cut = minChars + ws
+			} else {
+				cut = minChars
 			}
 		}
 

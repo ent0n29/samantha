@@ -15,6 +15,14 @@ func TestShouldSpeculateBrainCanonical(t *testing.T) {
 		t.Fatalf("shouldSpeculateBrainCanonical() = true for short input, want false")
 	}
 
+	if shouldSpeculateBrainCanonical("ship this now") {
+		t.Fatalf("shouldSpeculateBrainCanonical() = true for short 3-word input, want false")
+	}
+
+	if !shouldSpeculateBrainCanonical("please ship this now") {
+		t.Fatalf("shouldSpeculateBrainCanonical() = false for long enough 3-word+ input, want true")
+	}
+
 	if !shouldSpeculateBrainCanonical("please help me design the next autonomous iteration") {
 		t.Fatalf("shouldSpeculateBrainCanonical() = false for long multi-word input, want true")
 	}

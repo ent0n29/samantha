@@ -67,8 +67,8 @@ const (
 	memoryContextPrefetchFresh = 2 * time.Second
 	brainPrefetchFresh         = 3 * time.Second
 	brainPrefetchWaitBudget    = 80 * time.Millisecond
-	brainPrefetchMinCanonical  = 24
-	brainPrefetchMinWords      = 4
+	brainPrefetchMinCanonical  = 18
+	brainPrefetchMinWords      = 3
 	brainPrefetchStableRepeats = 2
 	memorySaveTimeout          = 2 * time.Second
 	ttsFinalizeTimeout         = 10 * time.Second
