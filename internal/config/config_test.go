@@ -24,8 +24,8 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.OpenClawHTTPURL != "" {
 		t.Fatalf("OpenClawHTTPURL = %q, want empty default", cfg.OpenClawHTTPURL)
 	}
-	if cfg.OpenClawCLIThinking != "low" {
-		t.Fatalf("OpenClawCLIThinking = %q, want %q", cfg.OpenClawCLIThinking, "low")
+	if cfg.OpenClawCLIThinking != "minimal" {
+		t.Fatalf("OpenClawCLIThinking = %q, want %q", cfg.OpenClawCLIThinking, "minimal")
 	}
 	if !cfg.OpenClawCLIStreaming {
 		t.Fatalf("OpenClawCLIStreaming = false, want true")

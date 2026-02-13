@@ -96,7 +96,7 @@ func Load() (Config, error) {
 		OpenClawAdapterMode:       envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
 		OpenClawHTTPURL:           stringsTrimSpace("OPENCLAW_HTTP_URL"),
 		OpenClawCLIPath:           envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
-		OpenClawCLIThinking:       envOrDefault("OPENCLAW_CLI_THINKING", "low"),
+		OpenClawCLIThinking:       envOrDefault("OPENCLAW_CLI_THINKING", "minimal"),
 		OpenClawCLIStreaming:      true,
 		OpenClawCLIStreamMinChars: 16,
 		ElevenLabsAPIKey:          stringsTrimSpace("ELEVENLABS_API_KEY"),
@@ -247,7 +247,7 @@ func Load() (Config, error) {
 	}
 	cfg.OpenClawCLIThinking = strings.ToLower(trimSpace(cfg.OpenClawCLIThinking))
 	if cfg.OpenClawCLIThinking == "" {
-		cfg.OpenClawCLIThinking = "low"
+		cfg.OpenClawCLIThinking = "minimal"
 	}
 	switch cfg.OpenClawCLIThinking {
 	case "minimal", "low", "medium", "high":

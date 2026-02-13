@@ -1021,15 +1021,6 @@ func (o *Orchestrator) runAssistantTurn(
 		}()
 	}
 
-	ttsRes := <-ttsResCh
-	ttsStream := ttsRes.stream
-	ttsErr := ttsRes.err
-	if !ttsRes.readyAt.IsZero() {
-		if d := ttsRes.readyAt.Sub(committedAt); d > 0 {
-			o.metrics.ObserveTurnStage("commit_to_tts_ready", d)
-		}
-	}
-
 	if o.memoryStore != nil && !prefetchedReady && !skipMemoryForPrefetchedBrain {
 		waitBudget := memoryContextSoftWait - time.Since(committedAt)
 		if waitBudget < 0 {
@@ -1055,10 +1046,6 @@ func (o *Orchestrator) runAssistantTurn(
 			o.metrics.ObserveTurnStage("commit_to_context_ready", d)
 		}
 	}
-
-	if ttsErr != nil {
-		return fmt.Errorf("start tts stream: %w", ttsErr)
-	}
 	if memReady && memRes.err != nil && !errors.Is(memRes.err, context.Canceled) {
 		if errors.Is(memRes.err, context.DeadlineExceeded) {
 			o.metrics.SessionEvents.WithLabelValues("memory_context_timeout").Inc()
@@ -1066,7 +1053,6 @@ func (o *Orchestrator) runAssistantTurn(
 			o.metrics.SessionEvents.WithLabelValues("memory_context_error").Inc()
 		}
 	}
-	defer ttsStream.Close()
 
 	recent := memRes.recent
 	contextLines := make([]string, 0, len(recent))
@@ -1074,9 +1060,24 @@ func (o *Orchestrator) runAssistantTurn(
 		contextLines = append(contextLines, fmt.Sprintf("%s: %s", r.Role, r.Content))
 	}
 
+	var (
+		ttsStream      TTSStream
+		ttsErr         error
+		ttsReady       bool
+		ttsDone        chan struct{}
+		ttsShouldClose bool
+	)
+	defer func() {
+		if ttsShouldClose && ttsStream != nil {
+			_ = ttsStream.Close()
+		}
+	}()
+
 	firstAudioObserved := false
 	firstTextObserved := false
+	speechProduced := false
 	speechSent := false
+	var speechPending strings.Builder
 	firstTextSignal := make(chan struct{})
 	var firstTextSignalOnce sync.Once
 	markFirstTextObserved := func() {
@@ -1086,52 +1087,126 @@ func (o *Orchestrator) runAssistantTurn(
 	}
 	defer markFirstTextObserved()
 
-	ttsDone := make(chan struct{})
-	go func() {
-		defer close(ttsDone)
-		seq := 0
-		for {
-			select {
-			case <-ctx.Done():
-				// Stop forwarding audio immediately on interruption; providers may still emit
-				// buffered chunks but the client should pivot to the new user utterance.
-				return
-			case evt, ok := <-ttsStream.Events():
-				if !ok {
+	startTTSForwarder := func(stream TTSStream) {
+		if ttsDone != nil || stream == nil {
+			return
+		}
+		ttsDone = make(chan struct{})
+		go func() {
+			defer close(ttsDone)
+			seq := 0
+			for {
+				select {
+				case <-ctx.Done():
+					// Stop forwarding audio immediately on interruption; providers may still emit
+					// buffered chunks but the client should pivot to the new user utterance.
 					return
-				}
-				switch evt.Type {
-				case TTSEventAudio:
-					if !firstAudioObserved {
-						firstAudioObserved = true
-						o.metrics.ObserveTurnStage("commit_to_first_audio", time.Since(committedAt))
-						o.metrics.ObserveFirstAudioLatency(time.Since(start))
+				case evt, ok := <-stream.Events():
+					if !ok {
+						return
 					}
-					seq++
-					o.send(outbound, protocol.AssistantAudioChunk{
-						Type:        protocol.TypeAssistantAudio,
-						SessionID:   s.ID,
-						TurnID:      turnID,
-						Seq:         seq,
-						Format:      evt.Format,
-						AudioBase64: evt.AudioBase64,
-					})
-				case TTSEventError:
-					o.metrics.ProviderErrors.WithLabelValues(o.ttsLabel, evt.Code).Inc()
-					o.send(outbound, protocol.ErrorEvent{
-						Type:      protocol.TypeErrorEvent,
-						SessionID: s.ID,
-						Code:      evt.Code,
-						Source:    "tts",
-						Retryable: evt.Retryable,
-						Detail:    evt.Detail,
-					})
-				case TTSEventFinal:
-					return
+					switch evt.Type {
+					case TTSEventAudio:
+						if !firstAudioObserved {
+							firstAudioObserved = true
+							o.metrics.ObserveTurnStage("commit_to_first_audio", time.Since(committedAt))
+							o.metrics.ObserveFirstAudioLatency(time.Since(start))
+						}
+						seq++
+						o.send(outbound, protocol.AssistantAudioChunk{
+							Type:        protocol.TypeAssistantAudio,
+							SessionID:   s.ID,
+							TurnID:      turnID,
+							Seq:         seq,
+							Format:      evt.Format,
+							AudioBase64: evt.AudioBase64,
+						})
+					case TTSEventError:
+						o.metrics.ProviderErrors.WithLabelValues(o.ttsLabel, evt.Code).Inc()
+						o.send(outbound, protocol.ErrorEvent{
+							Type:      protocol.TypeErrorEvent,
+							SessionID: s.ID,
+							Code:      evt.Code,
+							Source:    "tts",
+							Retryable: evt.Retryable,
+							Detail:    evt.Detail,
+						})
+					case TTSEventFinal:
+						return
+					}
 				}
 			}
+		}()
+	}
+
+	adoptTTSResult := func(block bool) bool {
+		if ttsReady {
+			return true
 		}
-	}()
+		var (
+			res ttsPreflightResult
+			ok  bool
+		)
+		if block {
+			select {
+			case <-ctx.Done():
+				return false
+			case res, ok = <-ttsResCh:
+				if !ok {
+					return false
+				}
+			}
+		} else {
+			select {
+			case res, ok = <-ttsResCh:
+				if !ok {
+					return false
+				}
+			default:
+				return false
+			}
+		}
+
+		ttsReady = true
+		ttsStream = res.stream
+		ttsErr = res.err
+		if !res.readyAt.IsZero() {
+			if d := res.readyAt.Sub(committedAt); d > 0 {
+				o.metrics.ObserveTurnStage("commit_to_tts_ready", d)
+			}
+		}
+		if ttsErr != nil {
+			o.metrics.SessionEvents.WithLabelValues("tts_start_failed").Inc()
+			o.send(outbound, protocol.ErrorEvent{
+				Type:      protocol.TypeErrorEvent,
+				SessionID: s.ID,
+				Code:      "tts_start_failed",
+				Source:    "tts",
+				Retryable: true,
+				Detail:    ttsErr.Error(),
+			})
+			return true
+		}
+		ttsShouldClose = true
+		startTTSForwarder(ttsStream)
+		return true
+	}
+
+	flushPendingSpeech := func() error {
+		if speechPending.Len() == 0 {
+			return nil
+		}
+		if !ttsReady || ttsErr != nil || ttsStream == nil {
+			return nil
+		}
+		out := speechPending.String()
+		speechPending.Reset()
+		if strings.TrimSpace(out) == "" {
+			return nil
+		}
+		speechSent = true
+		return ttsStream.SendText(ctx, out, true)
+	}
 
 	// Keep voice UX responsive: if the model hasn't started producing text quickly,
 	// emit a short visual progress cue instead of leaving dead air.
@@ -1177,9 +1252,19 @@ func (o *Orchestrator) runAssistantTurn(
 		if speechDelta == "" {
 			return nil
 		}
-		speechDelta = bridgeSpeechDelta(delta, speechDelta, speechSent)
-		speechSent = true
-		return ttsStream.SendText(ctx, speechDelta, true)
+		speechDelta = bridgeSpeechDelta(delta, speechDelta, speechProduced)
+		speechProduced = true
+
+		_ = adoptTTSResult(false)
+		if err := flushPendingSpeech(); err != nil {
+			return err
+		}
+		if ttsReady && ttsErr == nil && ttsStream != nil {
+			speechSent = true
+			return ttsStream.SendText(ctx, speechDelta, true)
+		}
+		speechPending.WriteString(speechDelta)
+		return nil
 	}
 
 	var (
@@ -1206,7 +1291,6 @@ func (o *Orchestrator) runAssistantTurn(
 			PersonaID:     profile.ID,
 		}, handleDelta)
 		if err != nil {
-			_ = ttsStream.CloseInput(ctx)
 			return fmt.Errorf("stream response: %w", err)
 		}
 	}
@@ -1229,22 +1313,39 @@ func (o *Orchestrator) runAssistantTurn(
 			})
 			speechOut := sanitizeSpeechText(assistantOut)
 			if speechOut != "" {
-				speechSent = true
-				_ = ttsStream.SendText(ctx, speechOut, true)
+				speechOut = bridgeSpeechDelta(assistantOut, speechOut, speechProduced)
+				speechProduced = true
+				_ = adoptTTSResult(false)
+				if err := flushPendingSpeech(); err != nil {
+					return err
+				}
+				if ttsReady && ttsErr == nil && ttsStream != nil {
+					speechSent = true
+					_ = ttsStream.SendText(ctx, speechOut, true)
+				} else {
+					speechPending.WriteString(speechOut)
+				}
 			}
 		}
 	}
-	if !speechSent && strings.TrimSpace(assistantOut) != "" {
-		_ = ttsStream.SendText(ctx, "I replied on screen.", true)
+	_ = adoptTTSResult(true)
+	if err := flushPendingSpeech(); err != nil {
+		return err
 	}
-	_ = ttsStream.CloseInput(ctx)
+	if ttsReady && ttsErr == nil && ttsStream != nil {
+		if !speechSent && strings.TrimSpace(assistantOut) != "" {
+			speechSent = true
+			_ = ttsStream.SendText(ctx, "I replied on screen.", true)
+		}
+		_ = ttsStream.CloseInput(ctx)
 
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-ttsDone:
-	case <-time.After(ttsFinalizeTimeout):
-		return fmt.Errorf("tts finalization timeout")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ttsDone:
+		case <-time.After(ttsFinalizeTimeout):
+			return fmt.Errorf("tts finalization timeout")
+		}
 	}
 
 	if strings.TrimSpace(assistantOut) != "" {
