@@ -17,8 +17,8 @@ type cliStreamCollector struct {
 func newCLIStreamCollector(minChars int) *cliStreamCollector {
 	minChars = normalizeStreamMinChars(minChars)
 	firstMin := minChars / 3
-	if firstMin < 8 {
-		firstMin = 8
+	if firstMin < 6 {
+		firstMin = 6
 	}
 	if firstMin > minChars {
 		firstMin = minChars
@@ -106,7 +106,7 @@ func nextCLIStreamSegment(input string, minChars int, force bool) (segment, rest
 
 	// If we already buffered enough text without punctuation, flush a short chunk
 	// to keep first-text latency and TTS responsiveness low.
-	if len(input) >= minChars*2 {
+	if len(input) >= minChars+8 {
 		cut := whitespaceCut(input, minChars)
 		seg := input[:cut]
 		rest := input[cut:]

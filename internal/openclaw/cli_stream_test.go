@@ -92,3 +92,30 @@ func TestCLIStreamCollectorJoinedDeltasMatchFinalText(t *testing.T) {
 		t.Fatalf("joined deltas = %q, want %q", got.String(), final)
 	}
 }
+
+func TestNormalizeStreamMinCharsDefaultsTo16(t *testing.T) {
+	if got := normalizeStreamMinChars(0); got != 16 {
+		t.Fatalf("normalizeStreamMinChars(0) = %d, want 16", got)
+	}
+}
+
+func TestCLIStreamCollectorFirstMinTunedForLatency(t *testing.T) {
+	c := newCLIStreamCollector(16)
+	if c.firstMin != 6 {
+		t.Fatalf("firstMin = %d, want 6", c.firstMin)
+	}
+}
+
+func TestNextCLIStreamSegmentFlushesSoonerWithoutPunctuation(t *testing.T) {
+	input := "alpha beta gamma delta zeta"
+	segment, rest, ok := nextCLIStreamSegment(input, 16, false)
+	if !ok {
+		t.Fatalf("nextCLIStreamSegment() = no segment, want early flush")
+	}
+	if strings.TrimSpace(segment) == "" {
+		t.Fatalf("segment = %q, want non-empty", segment)
+	}
+	if segment+rest != input {
+		t.Fatalf("segment+rest mismatch: %q + %q != %q", segment, rest, input)
+	}
+}

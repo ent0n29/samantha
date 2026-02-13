@@ -60,7 +60,7 @@ func normalizeThinkingLevel(raw string) string {
 
 func normalizeStreamMinChars(raw int) int {
 	if raw <= 0 {
-		return 24
+		return 16
 	}
 	if raw > 2048 {
 		return 2048
