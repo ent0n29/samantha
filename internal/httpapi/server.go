@@ -16,6 +16,7 @@ import (
 	"github.com/ent0n29/samantha/internal/observability"
 	"github.com/ent0n29/samantha/internal/protocol"
 	"github.com/ent0n29/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/taskruntime"
 )
 
 type Orchestrator interface {
@@ -27,16 +28,18 @@ type Server struct {
 	cfg          config.Config
 	sessions     *session.Manager
 	orchestrator Orchestrator
+	taskService  *taskruntime.Service
 	metrics      *observability.Metrics
 	upgrader     websocket.Upgrader
 	static       http.Handler
 }
 
-func New(cfg config.Config, sessions *session.Manager, orchestrator Orchestrator, metrics *observability.Metrics) *Server {
+func New(cfg config.Config, sessions *session.Manager, orchestrator Orchestrator, metrics *observability.Metrics, taskService *taskruntime.Service) *Server {
 	return &Server{
 		cfg:          cfg,
 		sessions:     sessions,
 		orchestrator: orchestrator,
+		taskService:  taskService,
 		metrics:      metrics,
 		static:       newStaticHandler(),
 		upgrader: websocket.Upgrader{
@@ -90,16 +93,30 @@ func (s *Server) Router() http.Handler {
 	r.Get("/v1/perf/latency", s.handlePerfLatency)
 	r.Get("/v1/voice/voices", s.handleListVoices)
 	r.Post("/v1/voice/tts/preview", s.handlePreviewTTS)
+	r.Post("/v1/tasks", s.handleCreateTask)
+	r.Post("/v1/tasks/{id}/approve", s.handleApproveTask)
+	r.Post("/v1/tasks/{id}/cancel", s.handleCancelTask)
+	r.Get("/v1/tasks/{id}", s.handleGetTask)
+	r.Get("/v1/tasks/{id}/events", s.handleListTaskEvents)
+	r.Get("/v1/tasks", s.handleListTasks)
 
 	return r
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	respondJSON(w, http.StatusOK, map[string]any{
+		"status":               "ok",
+		"task_runtime_enabled": s.taskService != nil && s.taskService.Enabled(),
+		"task_store_mode":      s.taskStoreMode(),
+	})
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
-	respondJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	respondJSON(w, http.StatusOK, map[string]any{
+		"status":               "ready",
+		"task_runtime_enabled": s.taskService != nil && s.taskService.Enabled(),
+		"task_store_mode":      s.taskStoreMode(),
+	})
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -305,6 +322,20 @@ func respondError(w http.ResponseWriter, status int, code, message string) {
 	respondJSON(w, status, errorResponse{Error: message, Code: code})
 }
 
+func (s *Server) taskStoreMode() string {
+	if s.taskService == nil {
+		if s.cfg.TaskRuntimeEnabled {
+			return "in-memory"
+		}
+		return "disabled"
+	}
+	mode := strings.TrimSpace(s.taskService.StoreMode())
+	if mode == "" {
+		return "disabled"
+	}
+	return mode
+}
+
 func messageTypeOf(v any) (protocol.MessageType, bool) {
 	switch m := v.(type) {
 	case protocol.ClientAudioChunk:
@@ -324,6 +355,24 @@ func messageTypeOf(v any) (protocol.MessageType, bool) {
 	case protocol.SystemEvent:
 		return m.Type, true
 	case protocol.ErrorEvent:
+		return m.Type, true
+	case protocol.TaskCreated:
+		return m.Type, true
+	case protocol.TaskPlanDelta:
+		return m.Type, true
+	case protocol.TaskStepStarted:
+		return m.Type, true
+	case protocol.TaskStepLog:
+		return m.Type, true
+	case protocol.TaskStepCompleted:
+		return m.Type, true
+	case protocol.TaskWaitingApproval:
+		return m.Type, true
+	case protocol.TaskCompleted:
+		return m.Type, true
+	case protocol.TaskFailed:
+		return m.Type, true
+	case protocol.TaskStatusSnapshot:
 		return m.Type, true
 	default:
 		return "", false

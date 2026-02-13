@@ -13,10 +13,14 @@ import (
 // CLIAdapter executes the OpenClaw CLI and extracts a textual reply.
 type CLIAdapter struct {
 	binaryPath string
+	thinking   string
 }
 
-func NewCLIAdapter(binaryPath string) *CLIAdapter {
-	return &CLIAdapter{binaryPath: strings.TrimSpace(binaryPath)}
+func NewCLIAdapter(binaryPath, thinking string) *CLIAdapter {
+	return &CLIAdapter{
+		binaryPath: strings.TrimSpace(binaryPath),
+		thinking:   normalizeThinkingLevel(thinking),
+	}
 }
 
 func (a *CLIAdapter) StreamResponse(
@@ -47,7 +51,7 @@ func (a *CLIAdapter) StreamResponse(
 		"--message",
 		prompt,
 		"--thinking",
-		"high",
+		a.thinking,
 	)
 
 	cmd := exec.CommandContext(ctx, a.binaryPath, args...)
@@ -82,6 +86,19 @@ func (a *CLIAdapter) StreamResponse(
 	}
 
 	return MessageResponse{Text: text}, nil
+}
+
+func normalizeThinkingLevel(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "minimal":
+		return "minimal"
+	case "low":
+		return "low"
+	case "high":
+		return "high"
+	default:
+		return "medium"
+	}
 }
 
 func buildPrompt(req MessageRequest) string {

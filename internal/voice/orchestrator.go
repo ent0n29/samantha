@@ -20,6 +20,8 @@ import (
 	"github.com/ent0n29/samantha/internal/protocol"
 	"github.com/ent0n29/samantha/internal/reliability"
 	"github.com/ent0n29/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/taskruntime"
+	"github.com/ent0n29/samantha/internal/tasks"
 )
 
 type PersonaProfile struct {
@@ -48,6 +50,7 @@ type Orchestrator struct {
 	profiles       map[string]PersonaProfile
 	strictOutbound bool
 	outboundMode   string
+	taskService    *taskruntime.Service
 }
 
 const (
@@ -70,6 +73,7 @@ func NewOrchestrator(
 	voiceProvider string,
 	strictOutbound bool,
 	outboundMode string,
+	taskService *taskruntime.Service,
 ) *Orchestrator {
 	vp := strings.ToLower(strings.TrimSpace(voiceProvider))
 	if vp == "" {
@@ -131,6 +135,7 @@ func NewOrchestrator(
 		profiles:       profiles,
 		strictOutbound: strictOutbound,
 		outboundMode:   mode,
+		taskService:    taskService,
 	}
 }
 
@@ -220,6 +225,18 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 	defer sttSession.Close()
 
 	var (
+		taskEvents <-chan tasks.Event
+		taskUnsub  func()
+	)
+	if o.taskService != nil && o.taskService.Enabled() {
+		taskEvents, taskUnsub = o.taskService.Subscribe(s.ID)
+		o.send(outbound, o.taskStatusSnapshotForSession(s.ID))
+	}
+	if taskUnsub != nil {
+		defer taskUnsub()
+	}
+
+	var (
 		turnMu       sync.Mutex
 		turnCancel   context.CancelFunc
 		activeTurnID string
@@ -285,6 +302,67 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					cancelActiveTurn("interrupted")
 				case "stop":
 					_ = sttSession.SendAudioChunk(ctx, "", lastSampleHz, true)
+				case "approve_task_step":
+					if o.taskService != nil && o.taskService.Enabled() {
+						approved := true
+						if m.Approved != nil {
+							approved = *m.Approved
+						}
+						var err error
+						if strings.TrimSpace(m.TaskID) != "" {
+							_, err = o.taskService.ApproveTask(ctx, m.TaskID, approved)
+						} else {
+							_, err = o.taskService.ApproveLatestForSession(ctx, s.ID, approved)
+						}
+						if err != nil {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_approval_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+					}
+				case "deny_task_step":
+					if o.taskService != nil && o.taskService.Enabled() {
+						var err error
+						if strings.TrimSpace(m.TaskID) != "" {
+							_, err = o.taskService.ApproveTask(ctx, m.TaskID, false)
+						} else {
+							_, err = o.taskService.ApproveLatestForSession(ctx, s.ID, false)
+						}
+						if err != nil {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_deny_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+					}
+				case "cancel_task":
+					if o.taskService != nil && o.taskService.Enabled() {
+						var err error
+						if strings.TrimSpace(m.TaskID) != "" {
+							_, err = o.taskService.CancelTask(ctx, m.TaskID, "Cancelled by user.")
+						} else {
+							_, err = o.taskService.CancelActiveForSession(ctx, s.ID, "Cancelled by user.")
+						}
+						if err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_cancel_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+					}
 				case "wakeword_on":
 					wakewordEnabled = true
 					manualArmUntil = time.Time{}
@@ -300,6 +378,48 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					// no-op currently
 				}
 			}
+		case taskEvt, ok := <-taskEvents:
+			if !ok {
+				taskEvents = nil
+				continue
+			}
+			switch taskEvt.Type {
+			case tasks.EventTaskCompleted:
+				note := strings.TrimSpace(taskEvt.Result)
+				if note == "" {
+					note = fmt.Sprintf("Task %s completed.", taskEvt.TaskID)
+				} else {
+					note = fmt.Sprintf("Task %s completed: %s", taskEvt.TaskID, note)
+				}
+				redacted, changed := policy.RedactPII(note)
+				o.saveTurnBestEffort(memory.TurnRecord{
+					ID:          uuid.NewString(),
+					UserID:      s.UserID,
+					SessionID:   s.ID,
+					Role:        "assistant",
+					Content:     redacted,
+					PIIRedacted: changed,
+					CreatedAt:   time.Now().UTC(),
+				})
+			case tasks.EventTaskFailed:
+				note := strings.TrimSpace(taskEvt.Detail)
+				if note == "" {
+					note = fmt.Sprintf("Task %s failed.", taskEvt.TaskID)
+				} else {
+					note = fmt.Sprintf("Task %s failed: %s", taskEvt.TaskID, note)
+				}
+				redacted, changed := policy.RedactPII(note)
+				o.saveTurnBestEffort(memory.TurnRecord{
+					ID:          uuid.NewString(),
+					UserID:      s.UserID,
+					SessionID:   s.ID,
+					Role:        "assistant",
+					Content:     redacted,
+					PIIRedacted: changed,
+					CreatedAt:   time.Now().UTC(),
+				})
+			}
+			o.sendTaskEvent(outbound, taskEvt)
 		case evt, ok := <-sttEvents:
 			if !ok {
 				cancelActiveTurn("stt_closed")
@@ -384,6 +504,99 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 					committedText = strings.TrimSpace(committedText)
 					if committedText == "" {
+						continue
+					}
+				}
+
+				if o.taskService != nil && o.taskService.Enabled() {
+					lowerCommit := strings.ToLower(strings.TrimSpace(committedText))
+					if lowerCommit == "approve task" || lowerCommit == "approve" {
+						if _, err := o.taskService.ApproveLatestForSession(ctx, s.ID, true); err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_approval_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+						continue
+					}
+					if lowerCommit == "deny task" || lowerCommit == "deny" {
+						if _, err := o.taskService.ApproveLatestForSession(ctx, s.ID, false); err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_deny_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+						continue
+					}
+					if lowerCommit == "cancel task" {
+						if _, err := o.taskService.CancelActiveForSession(ctx, s.ID, "Cancelled by user."); err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_cancel_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+						continue
+					}
+
+					createdTask, handledByTaskRuntime, err := o.taskService.MaybeCreateFromUtterance(ctx, s.ID, s.UserID, committedText)
+					if err != nil {
+						o.send(outbound, protocol.ErrorEvent{
+							Type:      protocol.TypeErrorEvent,
+							SessionID: s.ID,
+							Code:      "task_create_failed",
+							Source:    "task_runtime",
+							Retryable: false,
+							Detail:    err.Error(),
+						})
+					}
+					if handledByTaskRuntime {
+						redactedUserText, userChanged := policy.RedactPII(committedText)
+						o.saveTurnBestEffort(memory.TurnRecord{
+							ID:          uuid.NewString(),
+							UserID:      s.UserID,
+							SessionID:   s.ID,
+							Role:        "user",
+							Content:     redactedUserText,
+							PIIRedacted: userChanged,
+							CreatedAt:   time.Now().UTC(),
+						})
+
+						ackText := fmt.Sprintf("On it. I started task %s.", createdTask.ID)
+						turnID := uuid.NewString()
+						o.send(outbound, protocol.AssistantTextDelta{
+							Type:      protocol.TypeAssistantTextDelta,
+							SessionID: s.ID,
+							TurnID:    turnID,
+							TextDelta: ackText,
+						})
+						o.send(outbound, protocol.AssistantTurnEnd{
+							Type:      protocol.TypeAssistantTurnEnd,
+							SessionID: s.ID,
+							TurnID:    turnID,
+							Reason:    "completed",
+						})
+						redactedAck, ackChanged := policy.RedactPII(ackText)
+						o.saveTurnBestEffort(memory.TurnRecord{
+							ID:          uuid.NewString(),
+							UserID:      s.UserID,
+							SessionID:   s.ID,
+							Role:        "assistant",
+							Content:     redactedAck,
+							PIIRedacted: ackChanged,
+							CreatedAt:   time.Now().UTC(),
+						})
 						continue
 					}
 				}
@@ -530,6 +743,16 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 
 	firstAudioObserved := false
 	firstTextObserved := false
+	speechSent := false
+	firstTextSignal := make(chan struct{})
+	var firstTextSignalOnce sync.Once
+	markFirstTextObserved := func() {
+		firstTextSignalOnce.Do(func() {
+			close(firstTextSignal)
+		})
+	}
+	defer markFirstTextObserved()
+
 	ttsDone := make(chan struct{})
 	go func() {
 		defer close(ttsDone)
@@ -577,6 +800,26 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		}
 	}()
 
+	// Keep voice UX responsive: if the model hasn't started producing text quickly,
+	// emit a short visual progress cue instead of leaving dead air.
+	go func() {
+		timer := time.NewTimer(900 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-firstTextSignal:
+			return
+		case <-timer.C:
+			o.send(outbound, protocol.SystemEvent{
+				Type:      protocol.TypeSystemEvent,
+				SessionID: s.ID,
+				Code:      "assistant_working",
+				Detail:    "Thinking...",
+			})
+		}
+	}()
+
 	var assistantOut string
 	res, err := o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
 		UserID:        s.UserID,
@@ -589,6 +832,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		assistantOut += delta
 		if !firstTextObserved && strings.TrimSpace(delta) != "" {
 			firstTextObserved = true
+			markFirstTextObserved()
 			o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
 		}
 		o.send(outbound, protocol.AssistantTextDelta{
@@ -597,7 +841,12 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 			TurnID:    turnID,
 			TextDelta: delta,
 		})
-		return ttsStream.SendText(ctx, delta, true)
+		speechDelta := sanitizeSpeechText(delta)
+		if speechDelta == "" {
+			return nil
+		}
+		speechSent = true
+		return ttsStream.SendText(ctx, speechDelta, true)
 	})
 	if err != nil {
 		_ = ttsStream.CloseInput(ctx)
@@ -608,6 +857,7 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 		if assistantOut != "" {
 			if !firstTextObserved && strings.TrimSpace(assistantOut) != "" {
 				firstTextObserved = true
+				markFirstTextObserved()
 				o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
 			}
 			o.send(outbound, protocol.AssistantTextDelta{
@@ -616,8 +866,15 @@ func (o *Orchestrator) runAssistantTurn(ctx context.Context, s session.Session, 
 				TurnID:    turnID,
 				TextDelta: assistantOut,
 			})
-			_ = ttsStream.SendText(ctx, assistantOut, true)
+			speechOut := sanitizeSpeechText(assistantOut)
+			if speechOut != "" {
+				speechSent = true
+				_ = ttsStream.SendText(ctx, speechOut, true)
+			}
 		}
+	}
+	if !speechSent && strings.TrimSpace(assistantOut) != "" {
+		_ = ttsStream.SendText(ctx, "I replied on screen.", true)
 	}
 	_ = ttsStream.CloseInput(ctx)
 
@@ -770,6 +1027,117 @@ func (o *Orchestrator) send(outbound chan<- any, msg any) {
 	}
 }
 
+func (o *Orchestrator) sendTaskEvent(outbound chan<- any, evt tasks.Event) {
+	switch evt.Type {
+	case tasks.EventTaskCreated:
+		o.send(outbound, protocol.TaskCreated{
+			Type:             protocol.TypeTaskCreated,
+			SessionID:        evt.SessionID,
+			TaskID:           evt.TaskID,
+			Summary:          evt.Title,
+			Status:           string(evt.Status),
+			RiskLevel:        string(evt.RiskLevel),
+			RequiresApproval: evt.RequiresApproval,
+		})
+	case tasks.EventTaskPlanDelta:
+		o.send(outbound, protocol.TaskPlanDelta{
+			Type:           protocol.TypeTaskPlanDelta,
+			SessionID:      evt.SessionID,
+			TaskID:         evt.TaskID,
+			Status:         string(evt.Status),
+			TextDelta:      evt.TextDelta,
+			QueuedPosition: evt.QueuedPosition,
+		})
+	case tasks.EventTaskStepStarted:
+		o.send(outbound, protocol.TaskStepStarted{
+			Type:      protocol.TypeTaskStepStarted,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			StepID:    evt.StepID,
+			StepSeq:   evt.StepSeq,
+			Title:     evt.Title,
+			RiskLevel: string(evt.RiskLevel),
+		})
+	case tasks.EventTaskStepLog:
+		o.send(outbound, protocol.TaskStepLog{
+			Type:      protocol.TypeTaskStepLog,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			StepID:    evt.StepID,
+			TextDelta: evt.TextDelta,
+		})
+	case tasks.EventTaskStepCompleted:
+		o.send(outbound, protocol.TaskStepCompleted{
+			Type:      protocol.TypeTaskStepCompleted,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			StepID:    evt.StepID,
+			Status:    string(evt.Status),
+		})
+	case tasks.EventTaskWaitingApproval:
+		o.send(outbound, protocol.TaskWaitingApproval{
+			Type:             protocol.TypeTaskWaitingApproval,
+			SessionID:        evt.SessionID,
+			TaskID:           evt.TaskID,
+			StepID:           evt.StepID,
+			RiskLevel:        string(evt.RiskLevel),
+			Prompt:           evt.Prompt,
+			RequiresApproval: evt.RequiresApproval,
+		})
+	case tasks.EventTaskCompleted:
+		o.send(outbound, protocol.TaskCompleted{
+			Type:      protocol.TypeTaskCompleted,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			Status:    string(evt.Status),
+			Result:    evt.Result,
+		})
+	case tasks.EventTaskFailed:
+		o.send(outbound, protocol.TaskFailed{
+			Type:      protocol.TypeTaskFailed,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			StepID:    evt.StepID,
+			Status:    string(evt.Status),
+			Code:      evt.Code,
+			Detail:    evt.Detail,
+		})
+	}
+}
+
+func (o *Orchestrator) taskStatusSnapshotForSession(sessionID string) protocol.TaskStatusSnapshot {
+	snapshot := protocol.TaskStatusSnapshot{
+		Type:             protocol.TypeTaskStatusSnapshot,
+		SessionID:        sessionID,
+		Active:           []protocol.TaskStatusSnapshotItem{},
+		AwaitingApproval: []protocol.TaskStatusSnapshotItem{},
+		Planned:          []protocol.TaskStatusSnapshotItem{},
+	}
+	if o.taskService == nil || !o.taskService.Enabled() {
+		return snapshot
+	}
+
+	tasksBySession := o.taskService.ListTasks(sessionID, 100)
+	for _, task := range tasksBySession {
+		item := protocol.TaskStatusSnapshotItem{
+			TaskID:           task.ID,
+			Summary:          task.Summary,
+			Status:           string(task.Status),
+			RiskLevel:        string(task.RiskLevel),
+			RequiresApproval: task.RequiresApproval,
+		}
+		switch task.Status {
+		case tasks.TaskStatusRunning:
+			snapshot.Active = append(snapshot.Active, item)
+		case tasks.TaskStatusAwaitingApproval:
+			snapshot.AwaitingApproval = append(snapshot.AwaitingApproval, item)
+		case tasks.TaskStatusPlanned:
+			snapshot.Planned = append(snapshot.Planned, item)
+		}
+	}
+	return snapshot
+}
+
 func outboundMessageMeta(msg any) (msgType string, critical bool) {
 	switch m := msg.(type) {
 	case protocol.AssistantTurnEnd:
@@ -786,6 +1154,24 @@ func outboundMessageMeta(msg any) (msgType string, critical bool) {
 		return string(m.Type), false
 	case protocol.STTCommitted:
 		return string(m.Type), false
+	case protocol.TaskCreated:
+		return string(m.Type), true
+	case protocol.TaskPlanDelta:
+		return string(m.Type), false
+	case protocol.TaskStepStarted:
+		return string(m.Type), true
+	case protocol.TaskStepLog:
+		return string(m.Type), false
+	case protocol.TaskStepCompleted:
+		return string(m.Type), true
+	case protocol.TaskWaitingApproval:
+		return string(m.Type), true
+	case protocol.TaskCompleted:
+		return string(m.Type), true
+	case protocol.TaskFailed:
+		return string(m.Type), true
+	case protocol.TaskStatusSnapshot:
+		return string(m.Type), true
 	default:
 		return "unknown", false
 	}

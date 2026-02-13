@@ -21,6 +21,7 @@ Samantha is a small, voice-first runtime that gives OpenClaw a realtime micropho
 - HTTP + WebSocket gateway: `internal/httpapi/`
 - Session lifecycle: `internal/session/`
 - Realtime orchestration: `internal/voice/`
+- Task runtime (durable voice-to-task execution): `internal/taskruntime/` + `internal/tasks/`
 - Voice backends:
   - Local: whisper.cpp STT + Kokoro TTS (`internal/voice/local.go`)
   - ElevenLabs: realtime STT/TTS websockets (`internal/voice/elevenlabs.go`)
@@ -32,6 +33,9 @@ Samantha is a small, voice-first runtime that gives OpenClaw a realtime micropho
 - Memory store:
   - In-memory: `internal/memory/inmemory.go`
   - Postgres (optional): `internal/memory/postgres.go`
+- Task persistence:
+  - In-memory manager state by default
+  - Postgres-backed snapshots (`tasks`, `task_steps`) when `DATABASE_URL` is configured
 - OpenClaw workspace:
   - Template (versioned): `openclaw/samantha-workspace/`
   - Runtime scratch (not versioned): `~/.openclaw/workspaces/$OPENCLAW_AGENT_ID/` (default)

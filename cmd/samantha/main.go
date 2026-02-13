@@ -37,6 +37,9 @@ func main() {
 	} else {
 		log.Printf("voice provider: %s", cfg.VoiceProvider)
 	}
+	if build.TaskService != nil {
+		log.Printf("task runtime: enabled=%t store=%s", build.TaskService.Enabled(), build.TaskService.StoreMode())
+	}
 
 	httpServer := &http.Server{
 		Addr:    cfg.BindAddr,

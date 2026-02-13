@@ -11,6 +11,7 @@ import (
 	"github.com/ent0n29/samantha/internal/observability"
 	"github.com/ent0n29/samantha/internal/openclaw"
 	"github.com/ent0n29/samantha/internal/session"
+	"github.com/ent0n29/samantha/internal/taskruntime"
 	"github.com/ent0n29/samantha/internal/voice"
 )
 
@@ -26,6 +27,7 @@ type BuildResult struct {
 	API          *httpapi.Server
 	Sessions     *session.Manager
 	Orchestrator *voice.Orchestrator
+	TaskService  *taskruntime.Service
 	Metrics      *observability.Metrics
 	Voice        VoiceInfo
 
@@ -45,6 +47,7 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		Mode:             cfg.OpenClawAdapterMode,
 		HTTPURL:          cfg.OpenClawHTTPURL,
 		CLIPath:          cfg.OpenClawCLIPath,
+		CLIThinking:      cfg.OpenClawCLIThinking,
 		HTTPStreamStrict: cfg.OpenClawHTTPStreamStrict,
 	})
 	if err != nil {
@@ -57,6 +60,13 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		_ = memoryStore.Close()
 		return nil, err
 	}
+
+	taskService := taskruntime.New(taskruntime.Config{
+		Enabled:           cfg.TaskRuntimeEnabled,
+		TaskTimeout:       cfg.TaskTimeout,
+		IdempotencyWindow: cfg.TaskIdempotencyWindow,
+		DatabaseURL:       cfg.DatabaseURL,
+	}, adapter, metrics)
 
 	// Ensure API handlers know which backend is active (e.g. voices list).
 	cfg.VoiceProvider = voiceSetup.resolvedProvider
@@ -81,12 +91,18 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		cfg.VoiceProvider,
 		cfg.StrictOutbound,
 		cfg.WSBackpressureMode,
+		taskService,
 	)
 
-	api := httpapi.New(cfg, sessions, orchestrator, metrics)
+	api := httpapi.New(cfg, sessions, orchestrator, metrics, taskService)
 
 	cleanup := func() error {
 		var errs []string
+		if taskService != nil {
+			if err := taskService.Close(); err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
 		if voiceSetup.cleanup != nil {
 			if err := voiceSetup.cleanup(); err != nil {
 				errs = append(errs, err.Error())
@@ -106,6 +122,7 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		API:          api,
 		Sessions:     sessions,
 		Orchestrator: orchestrator,
+		TaskService:  taskService,
 		Metrics:      metrics,
 		Voice: VoiceInfo{
 			Provider:       cfg.VoiceProvider,

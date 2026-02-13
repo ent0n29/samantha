@@ -11,6 +11,11 @@ const BARGE_RMS_THRESHOLD = 0.02;
 const BARGE_FRAMES_THRESHOLD = 2;
 const BARGE_COOLDOWN_MS = 700;
 
+const TASK_BOOTSTRAP_LIMIT = 50;
+const TASK_EVENTS_LIMIT = 100;
+const TASK_EVENT_DEDUP_MAX = 800;
+const TASK_RESYNC_FALLBACK_MS = 1400;
+const TASK_REFRESH_AFTER_CONTROL_MS = 1200;
 
 // Lightweight client VAD for "always-on mic" without buffering silence forever.
 // This is intentionally heuristic (no ML): dynamic threshold + impulse/noise rejection.
@@ -57,6 +62,7 @@ const state = {
 
   reconnectTimer: null,
   reconnectBackoffMs: 250,
+  allowReconnect: true,
   lastTurnID: "",
 
   captionClearTimer: null,
@@ -108,6 +114,31 @@ const state = {
   perfSnapshot: null,
   perfError: "",
   perfUpdatedAtMs: 0,
+
+  taskDesk: {
+    runtimeEnabled: null,
+    syncState: "idle", // idle|snapshot_received|hydrating|synced|degraded
+    lastSyncAtMs: 0,
+    sessionId: "",
+    tasksById: new Map(),
+    timelinesByTask: new Map(),
+    orderedActive: [],
+    orderedAwaiting: [],
+    orderedPlanned: [],
+    eventSignatures: new Set(),
+    eventOrder: [],
+    actionInFlight: new Map(),
+    bootstrapPromise: null,
+    bootstrapForSession: "",
+    snapshotSeen: false,
+    fallbackTimer: null,
+    metrics: {
+      task_snapshot_received: 0,
+      task_bootstrap_success: 0,
+      task_bootstrap_error: 0,
+      task_event_dedup_hit: 0,
+    },
+  },
 };
 
 const el = {
@@ -131,6 +162,14 @@ const el = {
   perfLatency: document.getElementById("perfLatency"),
   perfUpdated: document.getElementById("perfUpdated"),
   events: document.getElementById("events"),
+  taskDesk: document.getElementById("taskDesk"),
+  taskSync: document.getElementById("taskSync"),
+  taskListActive: document.getElementById("taskListActive"),
+  taskListAwaiting: document.getElementById("taskListAwaiting"),
+  taskListPlanned: document.getElementById("taskListPlanned"),
+  taskCountActive: document.getElementById("taskCountActive"),
+  taskCountAwaiting: document.getElementById("taskCountAwaiting"),
+  taskCountPlanned: document.getElementById("taskCountPlanned"),
 
   onboard: document.getElementById("onboard"),
   onboardClose: document.getElementById("onboardClose"),
@@ -142,6 +181,7 @@ const el = {
 };
 
 function init() {
+  applySurfaceFlags();
   hydratePrefs();
   wireUI();
   wireOnboarding();
@@ -149,11 +189,24 @@ function init() {
   initViz();
   startEnergyLoop();
   renderPerfLatency();
+  renderTaskDesk();
 
   const onboarded = localStorage.getItem("samantha.onboarded") === "1";
   setPresence("disconnected", "Samantha", onboarded ? "Connecting…" : "Welcome. Hold anywhere for settings.");
   void ensureSessionConnected();
   void initOnboarding();
+}
+
+function applySurfaceFlags() {
+  if (!document || !document.body) {
+    return;
+  }
+  document.body.classList.toggle("show-task-desk", shouldShowTaskDesk());
+}
+
+function shouldShowTaskDesk() {
+  const qs = new URLSearchParams(window.location.search || "");
+  return qs.get("taskdesk") === "1" || qs.get("tasks") === "1";
 }
 
 function initViz() {
@@ -286,6 +339,18 @@ function wireUI() {
   el.endSessionBtn.addEventListener("click", () => {
     void endSession();
   });
+  el.taskDesk?.addEventListener("click", (evt) => {
+    const btn = evt.target instanceof Element ? evt.target.closest("[data-task-action]") : null;
+    if (!btn) {
+      return;
+    }
+    const action = String(btn.getAttribute("data-task-action") || "").trim();
+    const taskID = String(btn.getAttribute("data-task-id") || "").trim();
+    if (!action || !taskID) {
+      return;
+    }
+    void handleTaskDeskAction(taskID, action);
+  });
 
   window.addEventListener("keydown", (evt) => {
     if (evt.repeat) {
@@ -312,6 +377,24 @@ function wireUI() {
     if (evt.key === "d" || evt.key === "D") {
       evt.preventDefault();
       toggleDebug();
+      return;
+    }
+    if (evt.key === "y" || evt.key === "Y") {
+      evt.preventDefault();
+      sendControl("approve_task_step");
+      setCaption("Approval sent.", "", { clearAfterMs: 1400 });
+      return;
+    }
+    if (evt.key === "n" || evt.key === "N") {
+      evt.preventDefault();
+      sendControl("deny_task_step");
+      setCaption("Denial sent.", "", { clearAfterMs: 1400 });
+      return;
+    }
+    if (evt.key === "x" || evt.key === "X") {
+      evt.preventDefault();
+      sendControl("cancel_task");
+      setCaption("Cancel sent.", "", { clearAfterMs: 1400 });
     }
   });
 
@@ -384,12 +467,16 @@ async function initOnboarding() {
       if (Object.prototype.hasOwnProperty.call(state.onboardingStatus, "ui_audio_worklet")) {
         state.preferAudioWorklet = Boolean(state.onboardingStatus.ui_audio_worklet);
       }
+      if (Object.prototype.hasOwnProperty.call(state.onboardingStatus, "task_runtime_enabled")) {
+        state.taskDesk.runtimeEnabled = Boolean(state.onboardingStatus.task_runtime_enabled);
+      }
     }
   } catch (_err) {
     // ignore
   }
 
   renderOnboarding();
+  renderTaskDesk();
 
   const onboarded = localStorage.getItem("samantha.onboarded") === "1";
   const qs = new URLSearchParams(window.location.search || "");
@@ -919,6 +1006,7 @@ async function resetSession({ keepConnected }) {
   }
   const prior = state.sessionId;
   state.sessionId = "";
+  resetTaskDeskState("");
   if (prior) {
     try {
       await fetch(`/v1/voice/session/${encodeURIComponent(prior)}/end`, { method: "POST" });
@@ -952,6 +1040,7 @@ async function createSession() {
   }
   const payload = await res.json();
   state.sessionId = payload.session_id || "";
+  resetTaskDeskState(state.sessionId);
   if (typeof payload.voice_id === "string" && payload.voice_id.trim()) {
     state.voiceId = payload.voice_id.trim();
     // Keep prefs in sync even if the backend applied a default.
@@ -979,6 +1068,7 @@ async function connect() {
     state.sessionId,
   )}`;
 
+  state.allowReconnect = true;
   setPresence("connected", "Samantha", "Ready.");
 
   const ws = new WebSocket(wsURL);
@@ -987,6 +1077,7 @@ async function connect() {
   ws.addEventListener("open", () => {
     state.connected = true;
     state.reconnectBackoffMs = 250;
+    markTaskDeskConnected();
     logEvent("ws connected");
     setPresence("connected", "Samantha", "");
     void applyHandsFreeMode();
@@ -999,12 +1090,13 @@ async function connect() {
   ws.addEventListener("close", () => {
     state.connected = false;
     state.ws = null;
+    markTaskDeskDisconnected();
     void stopMic({ sendStop: false });
     stopPlayback({ clearBuffered: true });
     state.bargeInActive = false;
     state.bargeInFrames = 0;
     clearBargePreroll();
-    if (!document.hidden) {
+    if (state.allowReconnect && !document.hidden) {
       scheduleReconnect();
     }
     logEvent("ws disconnected");
@@ -1013,9 +1105,14 @@ async function connect() {
   ws.addEventListener("error", () => {
     // Close event will follow; keep it quiet.
   });
+
+  await waitForWSOpen(ws, 8000);
 }
 
 function scheduleReconnect() {
+  if (!state.allowReconnect) {
+    return;
+  }
   if (state.reconnectTimer) {
     return;
   }
@@ -1028,21 +1125,105 @@ function scheduleReconnect() {
 }
 
 async function reconnectFlow() {
+  const priorSessionID = (state.sessionId || "").trim();
   try {
-    await disconnect();
-  } catch (_err) {
-    // ignore
-  }
-  try {
-    await createSession();
+    if (!priorSessionID) {
+      await createSession();
+    }
     await connect();
   } catch (err) {
+    if (priorSessionID) {
+      try {
+        await createSession();
+        await connect();
+        return;
+      } catch (_fallbackErr) {
+        // fall through to retry schedule below.
+      }
+    }
     setPresence("error", "Samantha", stringifyError(err));
+    markTaskDeskSyncState("degraded");
+    state.taskDesk.metrics.task_bootstrap_error += 1;
+    renderTaskDesk();
     scheduleReconnect();
   }
 }
 
+function waitForWSOpen(ws, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (!ws) {
+      reject(new Error("websocket unavailable"));
+      return;
+    }
+    if (ws.readyState === WebSocket.OPEN) {
+      resolve();
+      return;
+    }
+    if (ws.readyState === WebSocket.CLOSED) {
+      reject(new Error("websocket closed"));
+      return;
+    }
+
+    let settled = false;
+    let timer = null;
+
+    const cleanup = () => {
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("close", onCloseBeforeOpen);
+      ws.removeEventListener("error", onErrorBeforeOpen);
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const onOpen = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const onCloseBeforeOpen = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error("websocket closed before open"));
+    };
+
+    const onErrorBeforeOpen = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error("websocket connect error"));
+    };
+
+    ws.addEventListener("open", onOpen);
+    ws.addEventListener("close", onCloseBeforeOpen);
+    ws.addEventListener("error", onErrorBeforeOpen);
+    timer = setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(new Error("websocket open timeout"));
+    }, Math.max(500, Number(timeoutMs) || 0));
+  });
+}
+
 async function disconnect() {
+  state.allowReconnect = false;
+  if (state.reconnectTimer) {
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = null;
+  }
   await stopMic({ sendStop: false });
   stopPlayback({ clearBuffered: true });
   state.bargeInActive = false;
@@ -1056,6 +1237,9 @@ async function disconnect() {
   }
   state.connected = false;
   state.ws = null;
+  markTaskDeskDisconnected();
+  markTaskDeskSyncState("idle");
+  renderTaskDesk();
   setPresence("disconnected", "Samantha", "Disconnected.");
 }
 
@@ -1071,6 +1255,7 @@ async function endSession() {
     // ignore
   }
   state.sessionId = "";
+  resetTaskDeskState("");
   logEvent("session ended");
   setPresence("disconnected", "Samantha", "Session ended.");
   toggleSheet(false);
@@ -1469,18 +1654,34 @@ function sendJSON(payload) {
   }
 }
 
-function sendControl(action) {
+function sendControl(action, opts = {}) {
   if (!state.sessionId) {
     return;
   }
-  const ok = sendJSON({
+  const taskID = typeof opts.taskID === "string" ? opts.taskID.trim() : "";
+  const approved = typeof opts.approved === "boolean" ? opts.approved : undefined;
+  const scope = typeof opts.scope === "string" ? opts.scope.trim() : "";
+  const payload = {
     type: "client_control",
     session_id: state.sessionId,
     action,
+  };
+  if (taskID) {
+    payload.task_id = taskID;
+  }
+  if (typeof approved === "boolean") {
+    payload.approved = approved;
+  }
+  if (scope) {
+    payload.scope = scope;
+  }
+  const ok = sendJSON({
+    ...payload,
   });
   if (ok) {
     logEvent(`control sent: ${action}`);
   }
+  return ok;
 }
 
 function mergePCMChunks(chunks, totalBytes) {
@@ -2353,6 +2554,19 @@ function handleServerMessage(raw) {
     case "assistant_turn_end":
       handleAssistantTurnEnd(msg);
       break;
+    case "task_status_snapshot":
+      handleTaskSnapshot(msg);
+      break;
+    case "task_created":
+    case "task_plan_delta":
+    case "task_step_started":
+    case "task_step_log":
+    case "task_step_completed":
+    case "task_waiting_approval":
+    case "task_completed":
+    case "task_failed":
+      handleTaskEvent(msg);
+      break;
     case "error_event":
       setPresence("error", "Something went wrong.", `${msg.code || "error"} (${msg.source || "gateway"})`);
       logError(`error_event ${msg.code || ""} ${msg.detail || ""}`.trim());
@@ -2371,6 +2585,13 @@ function handleSystemEvent(msg) {
       setPresence("listening", "Yes?", "");
       setCaption("Yes?", "", { clearAfterMs: 1200 });
       logEvent("wake word detected");
+      break;
+    case "assistant_working":
+      setPresence("thinking", "Thinking…", "");
+      if (msg.detail) {
+        setCaption("Thinking…", String(msg.detail || ""), { clearAfterMs: 1600 });
+      }
+      logEvent("assistant working");
       break;
     default:
       logEvent(`system event: ${code || "unknown"}`);
@@ -2460,6 +2681,858 @@ function handleAssistantTurnEnd(msg) {
     setPresence("connected", "Samantha", "Ready.");
   }
   logEvent(`assistant turn ended: ${reason}`);
+}
+
+function resetTaskDeskState(sessionID) {
+  const td = state.taskDesk;
+  clearTaskDeskFallbackTimer();
+  td.sessionId = String(sessionID || "").trim();
+  td.syncState = td.runtimeEnabled === false ? "disabled" : "idle";
+  td.lastSyncAtMs = 0;
+  td.tasksById.clear();
+  td.timelinesByTask.clear();
+  td.orderedActive = [];
+  td.orderedAwaiting = [];
+  td.orderedPlanned = [];
+  td.eventSignatures.clear();
+  td.eventOrder = [];
+  td.actionInFlight.clear();
+  td.bootstrapPromise = null;
+  td.bootstrapForSession = "";
+  td.snapshotSeen = false;
+  renderTaskDesk();
+}
+
+function clearTaskDeskFallbackTimer() {
+  const td = state.taskDesk;
+  if (!td.fallbackTimer) {
+    return;
+  }
+  clearTimeout(td.fallbackTimer);
+  td.fallbackTimer = null;
+}
+
+function markTaskDeskSyncState(nextState) {
+  const td = state.taskDesk;
+  td.syncState = String(nextState || "idle");
+  if (td.syncState === "synced" || td.syncState === "snapshot_received") {
+    td.lastSyncAtMs = Date.now();
+  }
+}
+
+function markTaskDeskConnected() {
+  const td = state.taskDesk;
+  const sessionID = (state.sessionId || "").trim();
+  if (!sessionID) {
+    return;
+  }
+  if (td.sessionId !== sessionID) {
+    resetTaskDeskState(sessionID);
+  }
+  td.snapshotSeen = false;
+  if (td.runtimeEnabled === false) {
+    markTaskDeskSyncState("disabled");
+    renderTaskDesk();
+    return;
+  }
+  clearTaskDeskFallbackTimer();
+  td.fallbackTimer = setTimeout(() => {
+    if (!state.connected) {
+      return;
+    }
+    if (td.snapshotSeen) {
+      return;
+    }
+    void bootstrapTaskDesk(sessionID, "ws_open_fallback");
+  }, TASK_RESYNC_FALLBACK_MS);
+  renderTaskDesk();
+}
+
+function markTaskDeskDisconnected() {
+  const td = state.taskDesk;
+  clearTaskDeskFallbackTimer();
+  if (td.runtimeEnabled === false) {
+    markTaskDeskSyncState("disabled");
+    return;
+  }
+  if (td.syncState !== "idle") {
+    markTaskDeskSyncState("degraded");
+  }
+}
+
+function normalizeTaskStatus(status) {
+  const s = String(status || "").trim().toLowerCase();
+  if (!s) {
+    return "planned";
+  }
+  if (s === "cancelled" || s === "failed" || s === "completed" || s === "running" || s === "awaiting_approval" || s === "planned") {
+    return s;
+  }
+  return "planned";
+}
+
+function isTaskTerminalStatus(status) {
+  const s = normalizeTaskStatus(status);
+  return s === "completed" || s === "failed" || s === "cancelled";
+}
+
+function parseTimestampMs(value) {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms) && ms > 0) {
+      return ms;
+    }
+  }
+  return Date.now();
+}
+
+function taskRiskValue(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (s === "high" || s === "medium" || s === "low") {
+    return s;
+  }
+  return "";
+}
+
+function taskEventSignature(evt) {
+  return [
+    String(evt?.task_id || ""),
+    String(evt?.type || ""),
+    String(evt?.step_id || ""),
+    String(evt?.status || ""),
+    String(evt?.code || ""),
+    String(evt?.detail || ""),
+    String(evt?.text_delta || ""),
+    String(evt?.result || ""),
+    String(evt?.at || ""),
+  ].join("|");
+}
+
+function rememberTaskEventSignature(signature) {
+  const td = state.taskDesk;
+  if (!signature) {
+    return false;
+  }
+  if (td.eventSignatures.has(signature)) {
+    td.metrics.task_event_dedup_hit += 1;
+    return true;
+  }
+  td.eventSignatures.add(signature);
+  td.eventOrder.push(signature);
+  while (td.eventOrder.length > TASK_EVENT_DEDUP_MAX) {
+    const old = td.eventOrder.shift();
+    if (old) {
+      td.eventSignatures.delete(old);
+    }
+  }
+  return false;
+}
+
+function appendTaskTimeline(taskID, entry) {
+  const td = state.taskDesk;
+  const items = td.timelinesByTask.get(taskID) || [];
+  items.push(entry);
+  while (items.length > 12) {
+    items.shift();
+  }
+  td.timelinesByTask.set(taskID, items);
+}
+
+function latestTaskTimelineNote(taskID) {
+  const td = state.taskDesk;
+  const items = td.timelinesByTask.get(taskID) || [];
+  if (items.length === 0) {
+    return "";
+  }
+  const last = items[items.length - 1];
+  return String(last?.text || "").trim();
+}
+
+function normalizeTaskFromSnapshotItem(item, status) {
+  const taskID = String(item?.task_id || "").trim();
+  if (!taskID) {
+    return null;
+  }
+  return {
+    id: taskID,
+    summary: String(item?.summary || "").trim() || `Task ${taskID.slice(0, 8)}`,
+    status: normalizeTaskStatus(status || item?.status),
+    riskLevel: taskRiskValue(item?.risk_level),
+    requiresApproval: Boolean(item?.requires_approval),
+    updatedAtMs: Date.now(),
+  };
+}
+
+function currentStepFromTask(task) {
+  if (!task || !Array.isArray(task.steps) || task.steps.length === 0) {
+    return null;
+  }
+  const currentID = String(task.current_step_id || "").trim();
+  if (currentID) {
+    for (const step of task.steps) {
+      if (String(step?.id || "").trim() === currentID) {
+        return step;
+      }
+    }
+  }
+  return task.steps[task.steps.length - 1];
+}
+
+function normalizeTaskFromAPI(task) {
+  const taskID = String(task?.id || "").trim();
+  if (!taskID) {
+    return null;
+  }
+  const step = currentStepFromTask(task);
+  const note = step?.output_redacted || step?.error || task?.error || task?.result || "";
+  return {
+    id: taskID,
+    summary: String(task?.summary || task?.intent_text || "").trim() || `Task ${taskID.slice(0, 8)}`,
+    status: normalizeTaskStatus(task?.status),
+    riskLevel: taskRiskValue(task?.risk_level),
+    requiresApproval: Boolean(task?.requires_approval),
+    updatedAtMs: parseTimestampMs(task?.updated_at || task?.created_at),
+    stepTitle: String(step?.title || "").trim(),
+    note: String(note || "").trim(),
+    error: String(task?.error || "").trim(),
+  };
+}
+
+function eventNoteFromMessage(msg) {
+  const type = String(msg?.type || "").trim();
+  switch (type) {
+    case "task_created":
+      return "Task created.";
+    case "task_plan_delta":
+      return String(msg?.text_delta || "").trim() || "Task plan updated.";
+    case "task_step_started":
+      return String(msg?.title || "").trim() ? `Started: ${String(msg.title).trim()}` : "Task step started.";
+    case "task_step_log":
+      return String(msg?.text_delta || "").trim() || "";
+    case "task_step_completed":
+      return "Task step completed.";
+    case "task_waiting_approval":
+      return String(msg?.prompt || "").trim() || "Waiting for approval.";
+    case "task_completed":
+      return String(msg?.result || "").trim() || "Task completed.";
+    case "task_failed":
+      return String(msg?.detail || msg?.code || "").trim() || "Task failed.";
+    default:
+      return "";
+  }
+}
+
+function upsertTaskDeskTask(patch) {
+  if (!patch || !patch.id) {
+    return;
+  }
+  const td = state.taskDesk;
+  const prev = td.tasksById.get(patch.id) || {};
+  const merged = {
+    id: patch.id,
+    summary: String(patch.summary || prev.summary || `Task ${patch.id.slice(0, 8)}`).trim(),
+    status: normalizeTaskStatus(patch.status || prev.status || "planned"),
+    riskLevel: taskRiskValue(patch.riskLevel || prev.riskLevel),
+    requiresApproval: typeof patch.requiresApproval === "boolean" ? patch.requiresApproval : Boolean(prev.requiresApproval),
+    updatedAtMs: Math.max(Number(prev.updatedAtMs) || 0, Number(patch.updatedAtMs) || Date.now()),
+    stepTitle: String(patch.stepTitle || prev.stepTitle || "").trim(),
+    note: String(patch.note || prev.note || "").trim(),
+    error: String(patch.error || prev.error || "").trim(),
+  };
+
+  if (!merged.requiresApproval && merged.status !== "awaiting_approval") {
+    td.actionInFlight.delete(merged.id);
+  }
+  if (isTaskTerminalStatus(merged.status)) {
+    td.actionInFlight.delete(merged.id);
+  }
+  td.tasksById.set(merged.id, merged);
+}
+
+function recomputeTaskDeskOrder() {
+  const td = state.taskDesk;
+  const all = Array.from(td.tasksById.values());
+  const byUpdatedDesc = (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
+  td.orderedActive = all.filter((t) => t.status === "running").sort(byUpdatedDesc).map((t) => t.id);
+  td.orderedAwaiting = all.filter((t) => t.status === "awaiting_approval").sort(byUpdatedDesc).map((t) => t.id);
+  td.orderedPlanned = all.filter((t) => t.status === "planned").sort(byUpdatedDesc).map((t) => t.id);
+}
+
+function taskSyncLabel() {
+  const td = state.taskDesk;
+  const stateName = String(td.syncState || "idle");
+  switch (stateName) {
+    case "snapshot_received":
+      return "snapshot";
+    case "hydrating":
+      return "syncing";
+    case "synced":
+      return td.lastSyncAtMs > 0 ? `${relativeTime(td.lastSyncAtMs)} sync` : "synced";
+    case "degraded":
+      return "degraded";
+    case "disabled":
+      return "disabled";
+    default:
+      return "idle";
+  }
+}
+
+function renderTaskDeskGroup(root, ids, emptyText) {
+  if (!root) {
+    return;
+  }
+  root.innerHTML = "";
+  const td = state.taskDesk;
+  if (!ids || ids.length === 0) {
+    const row = document.createElement("p");
+    row.className = "task-empty";
+    row.textContent = emptyText;
+    root.appendChild(row);
+    return;
+  }
+
+  for (const id of ids) {
+    const task = td.tasksById.get(id);
+    if (!task) {
+      continue;
+    }
+
+    const card = document.createElement("article");
+    card.className = "task-card";
+    if (task.riskLevel) {
+      card.setAttribute("data-risk", task.riskLevel);
+    }
+
+    const top = document.createElement("div");
+    top.className = "task-top";
+
+    const summary = document.createElement("div");
+    summary.className = "task-summary";
+    summary.textContent = softTruncate(task.summary || "Task", 120);
+
+    const meta = document.createElement("div");
+    meta.className = "task-meta";
+    const status = document.createElement("span");
+    status.className = "task-status";
+    status.textContent = String(task.status || "planned").replaceAll("_", " ");
+    meta.appendChild(status);
+    if (task.riskLevel) {
+      const risk = document.createElement("span");
+      risk.textContent = task.riskLevel;
+      meta.appendChild(risk);
+    }
+    const updated = document.createElement("span");
+    updated.textContent = relativeTime(task.updatedAtMs);
+    meta.appendChild(updated);
+
+    top.appendChild(summary);
+    top.appendChild(meta);
+    card.appendChild(top);
+
+    const noteText = latestTaskTimelineNote(task.id) || task.note || task.error || "";
+    if (noteText) {
+      const note = document.createElement("div");
+      note.className = "task-note";
+      note.textContent = softTruncate(noteText, 180);
+      card.appendChild(note);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "task-actions";
+    const inFlight = td.actionInFlight.has(task.id);
+
+    if (task.status === "awaiting_approval") {
+      const approve = document.createElement("button");
+      approve.type = "button";
+      approve.className = "task-action";
+      approve.textContent = "Approve";
+      approve.setAttribute("data-task-id", task.id);
+      approve.setAttribute("data-task-action", "approve");
+      approve.disabled = inFlight;
+      actions.appendChild(approve);
+
+      const deny = document.createElement("button");
+      deny.type = "button";
+      deny.className = "task-action";
+      deny.textContent = "Deny";
+      deny.setAttribute("data-task-id", task.id);
+      deny.setAttribute("data-task-action", "deny");
+      deny.disabled = inFlight;
+      actions.appendChild(deny);
+    }
+
+    if (!isTaskTerminalStatus(task.status)) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "task-action is-danger";
+      cancel.textContent = "Cancel";
+      cancel.setAttribute("data-task-id", task.id);
+      cancel.setAttribute("data-task-action", "cancel");
+      cancel.disabled = inFlight;
+      actions.appendChild(cancel);
+    }
+
+    if (actions.children.length > 0) {
+      card.appendChild(actions);
+    }
+    root.appendChild(card);
+  }
+}
+
+function renderTaskDesk() {
+  if (!el.taskDesk) {
+    return;
+  }
+  const td = state.taskDesk;
+  recomputeTaskDeskOrder();
+
+  if (el.taskCountActive) {
+    el.taskCountActive.textContent = String(td.orderedActive.length);
+  }
+  if (el.taskCountAwaiting) {
+    el.taskCountAwaiting.textContent = String(td.orderedAwaiting.length);
+  }
+  if (el.taskCountPlanned) {
+    el.taskCountPlanned.textContent = String(td.orderedPlanned.length);
+  }
+
+  if (el.taskSync) {
+    el.taskSync.textContent = taskSyncLabel();
+    el.taskSync.classList.remove("is-synced", "is-hydrating", "is-degraded");
+    if (td.syncState === "synced" || td.syncState === "snapshot_received") {
+      el.taskSync.classList.add("is-synced");
+    } else if (td.syncState === "hydrating") {
+      el.taskSync.classList.add("is-hydrating");
+    } else if (td.syncState === "degraded") {
+      el.taskSync.classList.add("is-degraded");
+    }
+  }
+
+  if (td.runtimeEnabled === false) {
+    renderTaskDeskGroup(el.taskListActive, [], "Task runtime disabled.");
+    renderTaskDeskGroup(el.taskListAwaiting, [], "Enable APP_TASK_RUNTIME_ENABLED to use tasks.");
+    renderTaskDeskGroup(el.taskListPlanned, [], "No queued tasks.");
+    return;
+  }
+
+  renderTaskDeskGroup(el.taskListActive, td.orderedActive, "No active tasks.");
+  renderTaskDeskGroup(el.taskListAwaiting, td.orderedAwaiting, "No approvals needed.");
+  renderTaskDeskGroup(el.taskListPlanned, td.orderedPlanned, "No queued tasks.");
+}
+
+async function bootstrapTaskDesk(sessionID, reason) {
+  const td = state.taskDesk;
+  const targetSession = String(sessionID || "").trim();
+  if (!targetSession || td.runtimeEnabled === false) {
+    return;
+  }
+  if (td.bootstrapPromise && td.bootstrapForSession === targetSession) {
+    return td.bootstrapPromise;
+  }
+
+  markTaskDeskSyncState("hydrating");
+  renderTaskDesk();
+
+  td.bootstrapForSession = targetSession;
+  td.bootstrapPromise = (async () => {
+    const listURL = `/v1/tasks?session_id=${encodeURIComponent(targetSession)}&limit=${TASK_BOOTSTRAP_LIMIT}`;
+    const res = await fetch(listURL, { cache: "no-store" });
+    if (res.status === 501) {
+      td.runtimeEnabled = false;
+      markTaskDeskSyncState("disabled");
+      renderTaskDesk();
+      return;
+    }
+    if (!res.ok) {
+      throw new Error(`tasks list failed: HTTP ${res.status}`);
+    }
+    const payload = await res.json();
+    if (td.sessionId !== targetSession) {
+      return;
+    }
+    td.runtimeEnabled = true;
+
+    const tasks = Array.isArray(payload?.tasks) ? payload.tasks : [];
+    const seenIDs = new Set();
+    for (const rawTask of tasks) {
+      const normalized = normalizeTaskFromAPI(rawTask);
+      if (!normalized) {
+        continue;
+      }
+      seenIDs.add(normalized.id);
+      upsertTaskDeskTask(normalized);
+    }
+    for (const [taskID, task] of td.tasksById.entries()) {
+      if (!seenIDs.has(taskID) && !isTaskTerminalStatus(task.status)) {
+        td.tasksById.delete(taskID);
+      }
+    }
+
+    const nonTerminalIDs = [];
+    for (const rawTask of tasks) {
+      const taskID = String(rawTask?.id || "").trim();
+      const status = normalizeTaskStatus(rawTask?.status);
+      if (!taskID || isTaskTerminalStatus(status)) {
+        continue;
+      }
+      nonTerminalIDs.push(taskID);
+    }
+    await Promise.all(nonTerminalIDs.map((taskID) => hydrateTaskEvents(taskID, targetSession)));
+
+    td.metrics.task_bootstrap_success += 1;
+    markTaskDeskSyncState("synced");
+    td.lastSyncAtMs = Date.now();
+    renderTaskDesk();
+    logEvent(`task bootstrap ok (${reason || "unknown"})`);
+  })().catch((err) => {
+    if (td.sessionId === targetSession) {
+      td.metrics.task_bootstrap_error += 1;
+      markTaskDeskSyncState("degraded");
+      renderTaskDesk();
+      logError(`task bootstrap failed: ${stringifyError(err)}`);
+    }
+  }).finally(() => {
+    if (td.bootstrapForSession === targetSession) {
+      td.bootstrapPromise = null;
+      td.bootstrapForSession = "";
+    }
+  });
+  return td.bootstrapPromise;
+}
+
+async function hydrateTaskEvents(taskID, expectedSessionID) {
+  const id = String(taskID || "").trim();
+  const expected = String(expectedSessionID || state.taskDesk.sessionId || "").trim();
+  if (!id || state.taskDesk.runtimeEnabled === false) {
+    return;
+  }
+  const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}/events?limit=${TASK_EVENTS_LIMIT}`, { cache: "no-store" });
+  if (!res.ok) {
+    return;
+  }
+  if (expected && state.taskDesk.sessionId !== expected) {
+    return;
+  }
+  const payload = await res.json();
+  const events = Array.isArray(payload?.events) ? payload.events : [];
+  for (const evt of events) {
+    if (expected && state.taskDesk.sessionId !== expected) {
+      return;
+    }
+    const merged = {
+      ...evt,
+      task_id: String(evt?.task_id || id).trim(),
+    };
+    applyTaskEventPatch(merged, { source: "bootstrap", suppressUI: true });
+  }
+  renderTaskDesk();
+}
+
+async function refreshTask(taskID, opts = {}) {
+  const id = String(taskID || "").trim();
+  if (!id || state.taskDesk.runtimeEnabled === false) {
+    return;
+  }
+  const delayMS = Number(opts.delayMS) || 0;
+  if (delayMS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, delayMS));
+  }
+  const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}`, { cache: "no-store" });
+  if (!res.ok) {
+    return;
+  }
+  const payload = await res.json();
+  const normalized = normalizeTaskFromAPI(payload);
+  if (normalized) {
+    upsertTaskDeskTask(normalized);
+    renderTaskDesk();
+  }
+  await hydrateTaskEvents(id, state.taskDesk.sessionId);
+}
+
+async function handleTaskDeskAction(taskID, action) {
+  const td = state.taskDesk;
+  const id = String(taskID || "").trim();
+  const op = String(action || "").trim();
+  if (!id || !op) {
+    return;
+  }
+  if (td.actionInFlight.has(id)) {
+    return;
+  }
+
+  td.actionInFlight.set(id, op);
+  renderTaskDesk();
+
+  try {
+    if (op === "approve") {
+      const ok = sendControl("approve_task_step", { taskID: id, approved: true });
+      if (!ok) {
+        throw new Error("websocket not connected");
+      }
+      setCaption("Approval sent.", "", { clearAfterMs: 1400 });
+      await refreshTask(id, { delayMS: TASK_REFRESH_AFTER_CONTROL_MS });
+      return;
+    }
+    if (op === "deny") {
+      const ok = sendControl("deny_task_step", { taskID: id, approved: false });
+      if (!ok) {
+        throw new Error("websocket not connected");
+      }
+      setCaption("Denial sent.", "", { clearAfterMs: 1400 });
+      await refreshTask(id, { delayMS: TASK_REFRESH_AFTER_CONTROL_MS });
+      return;
+    }
+    if (op === "cancel") {
+      const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}/cancel`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ reason: "Cancelled from Task Desk." }),
+      });
+      if (!res.ok) {
+        throw new Error(`cancel failed: HTTP ${res.status}`);
+      }
+      const payload = await res.json();
+      const normalized = normalizeTaskFromAPI(payload);
+      if (normalized) {
+        upsertTaskDeskTask(normalized);
+      }
+      await hydrateTaskEvents(id, state.taskDesk.sessionId);
+      setCaption("Cancel sent.", "", { clearAfterMs: 1400 });
+      return;
+    }
+  } catch (err) {
+    const task = td.tasksById.get(id);
+    if (task) {
+      task.error = stringifyError(err);
+      td.tasksById.set(id, task);
+    }
+    markTaskDeskSyncState("degraded");
+    logError(`task action failed: ${op} ${id} ${stringifyError(err)}`);
+  } finally {
+    td.actionInFlight.delete(id);
+    renderTaskDesk();
+  }
+}
+
+function applyTaskSnapshot(msg) {
+  const active = Array.isArray(msg?.active) ? msg.active : [];
+  const awaiting = Array.isArray(msg?.awaiting_approval) ? msg.awaiting_approval : [];
+  const planned = Array.isArray(msg?.planned) ? msg.planned : [];
+  const td = state.taskDesk;
+
+  for (const [taskID, task] of td.tasksById.entries()) {
+    if (!isTaskTerminalStatus(task.status)) {
+      td.tasksById.delete(taskID);
+    }
+  }
+
+  for (const item of active) {
+    const normalized = normalizeTaskFromSnapshotItem(item, "running");
+    if (normalized) {
+      upsertTaskDeskTask(normalized);
+    }
+  }
+  for (const item of awaiting) {
+    const normalized = normalizeTaskFromSnapshotItem(item, "awaiting_approval");
+    if (normalized) {
+      upsertTaskDeskTask(normalized);
+    }
+  }
+  for (const item of planned) {
+    const normalized = normalizeTaskFromSnapshotItem(item, "planned");
+    if (normalized) {
+      upsertTaskDeskTask(normalized);
+    }
+  }
+}
+
+function applyTaskEventPatch(msg, opts = {}) {
+  const taskID = String(msg?.task_id || "").trim();
+  if (!taskID) {
+    return false;
+  }
+  const signature = taskEventSignature(msg);
+  if (rememberTaskEventSignature(signature)) {
+    return false;
+  }
+
+  const type = String(msg?.type || "").trim();
+  const updatedAtMs = parseTimestampMs(msg?.at);
+  const patch = {
+    id: taskID,
+    updatedAtMs,
+    riskLevel: taskRiskValue(msg?.risk_level),
+  };
+  let statusSet = false;
+  switch (type) {
+    case "task_created":
+      patch.summary = String(msg?.summary || "").trim();
+      patch.status = normalizeTaskStatus(msg?.status || "planned");
+      patch.requiresApproval = Boolean(msg?.requires_approval);
+      statusSet = true;
+      break;
+    case "task_plan_delta":
+      patch.status = normalizeTaskStatus(msg?.status || "planned");
+      patch.note = String(msg?.text_delta || "").trim();
+      statusSet = true;
+      break;
+    case "task_step_started":
+      patch.status = "running";
+      patch.stepTitle = String(msg?.title || "").trim();
+      statusSet = true;
+      break;
+    case "task_step_log":
+      patch.note = String(msg?.text_delta || "").trim();
+      break;
+    case "task_step_completed":
+      if (msg?.status) {
+        patch.status = normalizeTaskStatus(msg?.status);
+        statusSet = true;
+      }
+      break;
+    case "task_waiting_approval":
+      patch.status = "awaiting_approval";
+      patch.requiresApproval = true;
+      patch.note = String(msg?.prompt || "").trim();
+      statusSet = true;
+      break;
+    case "task_completed":
+      patch.status = "completed";
+      patch.requiresApproval = false;
+      patch.note = String(msg?.result || "").trim();
+      statusSet = true;
+      break;
+    case "task_failed":
+      patch.status = normalizeTaskStatus(msg?.status || (String(msg?.code || "").trim() === "cancelled" ? "cancelled" : "failed"));
+      patch.requiresApproval = false;
+      patch.error = String(msg?.detail || msg?.code || "").trim();
+      statusSet = true;
+      break;
+    default:
+      break;
+  }
+  if (!statusSet) {
+    const existing = state.taskDesk.tasksById.get(taskID);
+    if (existing) {
+      patch.status = existing.status;
+    }
+  }
+  upsertTaskDeskTask(patch);
+
+  const note = eventNoteFromMessage(msg);
+  if (note) {
+    appendTaskTimeline(taskID, {
+      type,
+      atMs: updatedAtMs,
+      text: note,
+    });
+  }
+
+  if (!opts.suppressUI) {
+    switch (type) {
+      case "task_created":
+        setPresence("thinking", "Planning task…", "");
+        setCaption("Task created.", note || `Task ${taskID.slice(0, 8)}`, { clearAfterMs: 2200 });
+        logEvent(`task created: ${taskID}`);
+        break;
+      case "task_plan_delta":
+        setPresence("thinking", "Planning task…", "");
+        if (note) {
+          setCaption("Task planning…", softTruncate(note, 180), { clearAfterMs: 2200 });
+        }
+        logEvent(`task plan: ${taskID}`);
+        break;
+      case "task_step_started":
+        setPresence("thinking", "Running task…", "");
+        setCaption("Working on it.", softTruncate(note, 170), { clearAfterMs: 2200 });
+        logEvent(`task step started: ${taskID}`);
+        break;
+      case "task_step_log":
+        if (note) {
+          setCaption("Working on it.", softTruncate(note, 200), { clearAfterMs: 2800 });
+        }
+        logEvent(`task step log: ${taskID}`);
+        break;
+      case "task_step_completed":
+        setCaption("Step completed.", "", { clearAfterMs: 1600 });
+        logEvent(`task step completed: ${taskID}`);
+        break;
+      case "task_waiting_approval":
+        setPresence("connected", "Approval needed.", "");
+        setCaption("Approval required.", softTruncate(note || "Say “approve task” or “deny task”.", 220), { clearAfterMs: 5200 });
+        logEvent(`task waiting approval: ${taskID}`);
+        break;
+      case "task_completed":
+        setPresence("connected", "Task completed.", "");
+        setCaption("Task completed.", softTruncate(note, 220), { clearAfterMs: 3800 });
+        logEvent(`task completed: ${taskID}`);
+        break;
+      case "task_failed":
+        setPresence("error", "Task failed.", softTruncate(note, 220));
+        logError(`task failed: ${taskID} ${note}`.trim());
+        break;
+      default:
+        logEvent(`task event: ${type}`);
+        break;
+    }
+  }
+  return true;
+}
+
+function handleTaskSnapshot(msg) {
+  const td = state.taskDesk;
+  td.runtimeEnabled = true;
+  td.metrics.task_snapshot_received += 1;
+  td.snapshotSeen = true;
+  clearTaskDeskFallbackTimer();
+
+  applyTaskSnapshot(msg);
+  markTaskDeskSyncState("snapshot_received");
+  renderTaskDesk();
+
+  const awaiting = Array.isArray(msg?.awaiting_approval) ? msg.awaiting_approval : [];
+  if (awaiting.length > 0) {
+    setPresence("connected", "Approval needed.", "");
+    setCaption("Approval required.", `${awaiting.length} task(s) waiting for approval.`, { clearAfterMs: 3200 });
+  }
+  logEvent(`task snapshot: active=${Array.isArray(msg?.active) ? msg.active.length : 0} awaiting=${awaiting.length} planned=${Array.isArray(msg?.planned) ? msg.planned.length : 0}`);
+  if (state.sessionId) {
+    void bootstrapTaskDesk(state.sessionId, "snapshot");
+  }
+}
+
+function handleTaskEvent(msg) {
+  applyTaskEventPatch(msg, { source: "live", suppressUI: false });
+  renderTaskDesk();
+}
+
+function relativeTime(whenMs) {
+  const ms = Number(whenMs) || 0;
+  if (ms <= 0) {
+    return "just now";
+  }
+  const delta = Math.max(0, Date.now() - ms);
+  const sec = Math.floor(delta / 1000);
+  if (sec < 3) {
+    return "just now";
+  }
+  if (sec < 60) {
+    return `${sec}s ago`;
+  }
+  const min = Math.floor(sec / 60);
+  if (min < 60) {
+    return `${min}m ago`;
+  }
+  const hr = Math.floor(min / 60);
+  if (hr < 24) {
+    return `${hr}h ago`;
+  }
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
 }
 
 function playBufferedTurnAudio(turnID) {

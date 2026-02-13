@@ -16,6 +16,14 @@ fi
 if [[ -d "$ROOT/.tools/whispercpp/bin" ]]; then
   export PATH="$ROOT/.tools/whispercpp/bin:$PATH"
 fi
+# 2b) Prefer vendored whisper.cpp dylibs if present.
+if [[ -d "$ROOT/.tools/whispercpp/lib" ]]; then
+  if [[ -n "${DYLD_FALLBACK_LIBRARY_PATH:-}" ]]; then
+    export DYLD_FALLBACK_LIBRARY_PATH="$ROOT/.tools/whispercpp/lib:$DYLD_FALLBACK_LIBRARY_PATH"
+  else
+    export DYLD_FALLBACK_LIBRARY_PATH="$ROOT/.tools/whispercpp/lib"
+  fi
+fi
 # 3) Prefer an arm64 node if present
 if [[ -d "$ARM64_NODE_BIN" ]]; then
   export PATH="$ARM64_NODE_BIN:$PATH"
@@ -49,6 +57,10 @@ fi
 # Ensure the selected OpenClaw agent exists (non-interactive).
 if command -v openclaw >/dev/null 2>&1; then
   AGENT_ID="${OPENCLAW_AGENT_ID:-samantha}"
+  WORKSPACE_EXPLICIT=0
+  if [[ -n "${OPENCLAW_WORKSPACE_DIR:-}" ]]; then
+    WORKSPACE_EXPLICIT=1
+  fi
   # Mutable OpenClaw scratch (downloaded repos, web scrapes, tool outputs) must not live in the git repo.
   # Keep the repo directory as a template only, and sync it into a per-user workspace.
   WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$HOME/.openclaw/workspaces/$AGENT_ID}"
@@ -57,12 +69,15 @@ if command -v openclaw >/dev/null 2>&1; then
   fi
 
   TEMPLATE_DIR="$ROOT/openclaw/samantha-workspace"
-  mkdir -p "$WORKSPACE_DIR" >/dev/null 2>&1 || true
-  for f in AGENTS.md HEARTBEAT.md IDENTITY.md SOUL.md TOOLS.md USER.md; do
-    if [[ -f "$TEMPLATE_DIR/$f" ]]; then
-      cp -f "$TEMPLATE_DIR/$f" "$WORKSPACE_DIR/$f" >/dev/null 2>&1 || true
-    fi
-  done
+  sync_workspace_template() {
+    local workspace="$1"
+    mkdir -p "$workspace" >/dev/null 2>&1 || true
+    for f in AGENTS.md HEARTBEAT.md IDENTITY.md SOUL.md TOOLS.md USER.md; do
+      if [[ -f "$TEMPLATE_DIR/$f" ]]; then
+        cp -f "$TEMPLATE_DIR/$f" "$workspace/$f" >/dev/null 2>&1 || true
+      fi
+    done
+  }
 
   agents_json="$(openclaw agents list --json 2>/dev/null || true)"
   agent_info="$(AGENTS_JSON="$agents_json" python3 -c 'import json,os,sys
@@ -98,20 +113,24 @@ print(f"{exists}|{ws.strip()}")' "$AGENT_ID" 2>/dev/null || echo "0|")"
     desired_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$WORKSPACE_DIR" 2>/dev/null || echo "$WORKSPACE_DIR")"
     existing_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$existing_workspace" 2>/dev/null || echo "$existing_workspace")"
     if [[ "$existing_real" != "$desired_real" ]]; then
-      echo "OpenClaw agent '$AGENT_ID' workspace mismatch:" >&2
-      echo "  configured: $existing_workspace" >&2
-      echo "  expected:   $WORKSPACE_DIR" >&2
-      echo "" >&2
-      echo "To fix (non-destructive options first):" >&2
-      echo "  1) Keep using the configured workspace (fastest):" >&2
-      echo "     export OPENCLAW_WORKSPACE_DIR=\"$existing_workspace\"" >&2
-      echo "  2) Use a different agent id for this repo (keeps your existing agent state intact):" >&2
-      echo "     export OPENCLAW_AGENT_ID=\"${AGENT_ID}-$(date +%s)\"" >&2
-      echo "  3) If you want to migrate the existing agent without losing sessions/state:" >&2
-      echo "     update the agent workspace path in ~/.openclaw/openclaw.json" >&2
-      echo "  4) Last resort (destructive): delete + recreate the agent:" >&2
-      echo "     openclaw agents delete $AGENT_ID" >&2
-      exit 1
+      if [[ "$WORKSPACE_EXPLICIT" == "1" ]]; then
+        echo "OpenClaw agent '$AGENT_ID' workspace mismatch:" >&2
+        echo "  configured: $existing_workspace" >&2
+        echo "  expected:   $WORKSPACE_DIR" >&2
+        echo "" >&2
+        echo "To fix (non-destructive options first):" >&2
+        echo "  1) Keep using the configured workspace (fastest):" >&2
+        echo "     export OPENCLAW_WORKSPACE_DIR=\"$existing_workspace\"" >&2
+        echo "  2) Use a different agent id for this repo (keeps your existing agent state intact):" >&2
+        echo "     export OPENCLAW_AGENT_ID=\"${AGENT_ID}-$(date +%s)\"" >&2
+        echo "  3) If you want to migrate the existing agent without losing sessions/state:" >&2
+        echo "     update the agent workspace path in ~/.openclaw/openclaw.json" >&2
+        echo "  4) Last resort (destructive): delete + recreate the agent:" >&2
+        echo "     openclaw agents delete $AGENT_ID" >&2
+        exit 1
+      fi
+      echo "OpenClaw agent '$AGENT_ID' already uses workspace '$existing_workspace'; reusing it." >&2
+      WORKSPACE_DIR="$existing_workspace"
     fi
   else
     if ! openclaw agents add "$AGENT_ID" \
@@ -123,6 +142,8 @@ print(f"{exists}|{ws.strip()}")' "$AGENT_ID" 2>/dev/null || echo "0|")"
     fi
   fi
 
+  sync_workspace_template "$WORKSPACE_DIR"
+
   if [[ -f "$AUTH_MAIN" && ! -f "$AUTH_SAM" ]]; then
     mkdir -p "$(dirname "$AUTH_SAM")" || true
     cp -f "$AUTH_MAIN" "$AUTH_SAM" || true
@@ -130,13 +151,13 @@ print(f"{exists}|{ws.strip()}")' "$AGENT_ID" 2>/dev/null || echo "0|")"
   fi
 fi
 
-VOICE_PROVIDER_LOWER="$(echo "${VOICE_PROVIDER:-auto}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
+VOICE_PROVIDER_LOWER="$(echo "${VOICE_PROVIDER:-local}" | tr '[:upper:]' '[:lower:]' | tr -d ' ')"
 
 if [[ "$VOICE_PROVIDER_LOWER" == "elevenlabs" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
   echo "Note: VOICE_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set (server will fail to start)." >&2
 fi
 
-# Auto mode falls back to mock voice if local voice isn't available.
+# Auto mode can use local fallback when ElevenLabs fails.
 if [[ "$VOICE_PROVIDER_LOWER" == "auto" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
   echo "Note: ELEVENLABS_API_KEY is not set; VOICE_PROVIDER=auto will try local voice, then mock." >&2
 fi
@@ -145,14 +166,35 @@ needs_local_voice=0
 if [[ "$VOICE_PROVIDER_LOWER" == "local" ]]; then
   needs_local_voice=1
 fi
-if [[ "$VOICE_PROVIDER_LOWER" == "auto" && -z "${ELEVENLABS_API_KEY:-}" ]]; then
+if [[ "$VOICE_PROVIDER_LOWER" == "auto" ]]; then
   needs_local_voice=1
 fi
+
+whisper_tool_healthy() {
+  local tool_path="$1"
+  if [[ -z "$tool_path" || ! -x "$tool_path" ]]; then
+    return 1
+  fi
+  if ! file "$tool_path" 2>/dev/null | grep -q 'arm64'; then
+    return 1
+  fi
+  if command -v otool >/dev/null 2>&1; then
+    if otool -l "$tool_path" 2>/dev/null | grep -Fq "$ROOT/.tools/build/"; then
+      return 1
+    fi
+  fi
+  local err
+  err="$("$tool_path" --help 2>&1 >/dev/null || true)"
+  if echo "$err" | grep -Eiq 'dyld|library not loaded|image not found'; then
+    return 1
+  fi
+  return 0
+}
 
 if [[ "$needs_local_voice" == "1" ]]; then
   need_setup=0
 
-  # Prefer repo-local arm64 whisper.cpp tools. If only x86_64 tools are found, rebuild.
+  # Prefer repo-local arm64 whisper.cpp tools and ensure they are runtime-loadable.
   whisper_cli_path=""
   whisper_server_path=""
   if command -v whisper-cli >/dev/null 2>&1; then
@@ -162,10 +204,10 @@ if [[ "$needs_local_voice" == "1" ]]; then
     whisper_server_path="$(command -v whisper-server)"
   fi
 
-  if [[ -z "$whisper_cli_path" ]] || ! file "$whisper_cli_path" 2>/dev/null | grep -q 'arm64'; then
+  if ! whisper_tool_healthy "$whisper_cli_path"; then
     need_setup=1
   fi
-  if [[ -z "$whisper_server_path" ]] || ! file "$whisper_server_path" 2>/dev/null | grep -q 'arm64'; then
+  if ! whisper_tool_healthy "$whisper_server_path"; then
     need_setup=1
   fi
 

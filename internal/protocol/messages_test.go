@@ -44,6 +44,25 @@ func TestParseClientMessageControl(t *testing.T) {
 	}
 }
 
+func TestParseClientMessageTaskControl(t *testing.T) {
+	raw := []byte(`{"type":"client_control","session_id":"s1","action":"approve_task_step","task_id":"t1","approved":true}`)
+	msg, err := ParseClientMessage(raw)
+	if err != nil {
+		t.Fatalf("ParseClientMessage() error = %v", err)
+	}
+
+	control, ok := msg.(ClientControl)
+	if !ok {
+		t.Fatalf("message type = %T, want ClientControl", msg)
+	}
+	if control.TaskID != "t1" {
+		t.Fatalf("TaskID = %q, want %q", control.TaskID, "t1")
+	}
+	if control.Approved == nil || !*control.Approved {
+		t.Fatalf("Approved = %v, want true", control.Approved)
+	}
+}
+
 func TestParseClientMessageRejectsInvalidAudioChunk(t *testing.T) {
 	_, err := ParseClientMessage([]byte(`{"type":"client_audio_chunk","session_id":"","pcm16_base64":"","sample_rate":0}`))
 	if err == nil {

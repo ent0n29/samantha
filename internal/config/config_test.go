@@ -18,8 +18,14 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.OpenClawAdapterMode != "auto" {
 		t.Fatalf("OpenClawAdapterMode = %q, want %q", cfg.OpenClawAdapterMode, "auto")
 	}
+	if cfg.VoiceProvider != "local" {
+		t.Fatalf("VoiceProvider = %q, want %q", cfg.VoiceProvider, "local")
+	}
 	if cfg.OpenClawHTTPURL != "" {
 		t.Fatalf("OpenClawHTTPURL = %q, want empty default", cfg.OpenClawHTTPURL)
+	}
+	if cfg.OpenClawCLIThinking != "low" {
+		t.Fatalf("OpenClawCLIThinking = %q, want %q", cfg.OpenClawCLIThinking, "low")
 	}
 }
 
@@ -57,6 +63,15 @@ func TestLoadBackpressureAndRetentionDefaults(t *testing.T) {
 	if cfg.SessionRetention != 24*time.Hour {
 		t.Fatalf("SessionRetention = %s, want 24h", cfg.SessionRetention)
 	}
+	if cfg.TaskRuntimeEnabled {
+		t.Fatalf("TaskRuntimeEnabled = true, want false")
+	}
+	if cfg.TaskTimeout != 20*time.Minute {
+		t.Fatalf("TaskTimeout = %s, want 20m", cfg.TaskTimeout)
+	}
+	if cfg.TaskIdempotencyWindow != 10*time.Second {
+		t.Fatalf("TaskIdempotencyWindow = %s, want 10s", cfg.TaskIdempotencyWindow)
+	}
 	if cfg.OpenClawHTTPStreamStrict {
 		t.Fatalf("OpenClawHTTPStreamStrict = true, want false")
 	}
@@ -76,6 +91,20 @@ func TestLoadRejectsInvalidBackpressureMode(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidOpenClawCLIThinking(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9394")
+	t.Setenv("OPENCLAW_CLI_THINKING", "ultra")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid OPENCLAW_CLI_THINKING")
+	}
+	if !strings.Contains(err.Error(), "OPENCLAW_CLI_THINKING") {
+		t.Fatalf("Load() error = %v, want OPENCLAW_CLI_THINKING validation error", err)
+	}
+}
+
 func TestLoadParsesSessionRetention(t *testing.T) {
 	setCoreEnvEmpty(t)
 	t.Setenv("APP_BIND_ADDR", ":9494")
@@ -83,6 +112,9 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	t.Setenv("APP_STRICT_OUTBOUND", "true")
 	t.Setenv("APP_UI_AUDIO_WORKLET", "false")
 	t.Setenv("APP_WS_BACKPRESSURE_MODE", "block")
+	t.Setenv("APP_TASK_RUNTIME_ENABLED", "true")
+	t.Setenv("APP_TASK_TIMEOUT", "30m")
+	t.Setenv("APP_TASK_IDEMPOTENCY_WINDOW", "15s")
 	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
 
 	cfg, err := Load()
@@ -101,6 +133,15 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	if cfg.WSBackpressureMode != "block" {
 		t.Fatalf("WSBackpressureMode = %q, want %q", cfg.WSBackpressureMode, "block")
 	}
+	if !cfg.TaskRuntimeEnabled {
+		t.Fatalf("TaskRuntimeEnabled = false, want true")
+	}
+	if cfg.TaskTimeout != 30*time.Minute {
+		t.Fatalf("TaskTimeout = %s, want 30m", cfg.TaskTimeout)
+	}
+	if cfg.TaskIdempotencyWindow != 15*time.Second {
+		t.Fatalf("TaskIdempotencyWindow = %s, want 15s", cfg.TaskIdempotencyWindow)
+	}
 	if !cfg.OpenClawHTTPStreamStrict {
 		t.Fatalf("OpenClawHTTPStreamStrict = false, want true")
 	}
@@ -114,6 +155,9 @@ func setCoreEnvEmpty(t *testing.T) {
 		"APP_SESSION_INACTIVITY_TIMEOUT",
 		"APP_SESSION_RETENTION",
 		"APP_FIRST_AUDIO_SLO",
+		"APP_TASK_RUNTIME_ENABLED",
+		"APP_TASK_TIMEOUT",
+		"APP_TASK_IDEMPOTENCY_WINDOW",
 		"APP_METRICS_NAMESPACE",
 		"APP_ALLOW_ANY_ORIGIN",
 		"APP_STRICT_OUTBOUND",
@@ -140,6 +184,7 @@ func setCoreEnvEmpty(t *testing.T) {
 		"OPENCLAW_ADAPTER_MODE",
 		"OPENCLAW_HTTP_URL",
 		"OPENCLAW_CLI_PATH",
+		"OPENCLAW_CLI_THINKING",
 		"OPENCLAW_HTTP_STREAM_STRICT",
 		"DATABASE_URL",
 		"MEMORY_EMBEDDING_DIM",

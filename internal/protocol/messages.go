@@ -10,15 +10,24 @@ import (
 type MessageType string
 
 const (
-	TypeClientAudioChunk   MessageType = "client_audio_chunk"
-	TypeClientControl      MessageType = "client_control"
-	TypeSTTPartial         MessageType = "stt_partial"
-	TypeSTTCommitted       MessageType = "stt_committed"
-	TypeAssistantTextDelta MessageType = "assistant_text_delta"
-	TypeAssistantAudio     MessageType = "assistant_audio_chunk"
-	TypeAssistantTurnEnd   MessageType = "assistant_turn_end"
-	TypeSystemEvent        MessageType = "system_event"
-	TypeErrorEvent         MessageType = "error_event"
+	TypeClientAudioChunk    MessageType = "client_audio_chunk"
+	TypeClientControl       MessageType = "client_control"
+	TypeSTTPartial          MessageType = "stt_partial"
+	TypeSTTCommitted        MessageType = "stt_committed"
+	TypeAssistantTextDelta  MessageType = "assistant_text_delta"
+	TypeAssistantAudio      MessageType = "assistant_audio_chunk"
+	TypeAssistantTurnEnd    MessageType = "assistant_turn_end"
+	TypeSystemEvent         MessageType = "system_event"
+	TypeErrorEvent          MessageType = "error_event"
+	TypeTaskCreated         MessageType = "task_created"
+	TypeTaskPlanDelta       MessageType = "task_plan_delta"
+	TypeTaskStepStarted     MessageType = "task_step_started"
+	TypeTaskStepLog         MessageType = "task_step_log"
+	TypeTaskStepCompleted   MessageType = "task_step_completed"
+	TypeTaskWaitingApproval MessageType = "task_waiting_approval"
+	TypeTaskCompleted       MessageType = "task_completed"
+	TypeTaskFailed          MessageType = "task_failed"
+	TypeTaskStatusSnapshot  MessageType = "task_status_snapshot"
 )
 
 var ErrUnsupportedType = errors.New("unsupported message type")
@@ -40,6 +49,9 @@ type ClientControl struct {
 	Type      MessageType `json:"type"`
 	SessionID string      `json:"session_id"`
 	Action    string      `json:"action"`
+	TaskID    string      `json:"task_id,omitempty"`
+	Approved  *bool       `json:"approved,omitempty"`
+	Scope     string      `json:"scope,omitempty"`
 }
 
 type STTPartial struct {
@@ -96,6 +108,95 @@ type ErrorEvent struct {
 	Detail    string      `json:"detail"`
 }
 
+type TaskCreated struct {
+	Type             MessageType `json:"type"`
+	SessionID        string      `json:"session_id"`
+	TaskID           string      `json:"task_id"`
+	Summary          string      `json:"summary"`
+	Status           string      `json:"status"`
+	RiskLevel        string      `json:"risk_level,omitempty"`
+	RequiresApproval bool        `json:"requires_approval,omitempty"`
+}
+
+type TaskPlanDelta struct {
+	Type           MessageType `json:"type"`
+	SessionID      string      `json:"session_id"`
+	TaskID         string      `json:"task_id"`
+	Status         string      `json:"status"`
+	TextDelta      string      `json:"text_delta,omitempty"`
+	QueuedPosition int         `json:"queued_position,omitempty"`
+}
+
+type TaskStepStarted struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TaskID    string      `json:"task_id"`
+	StepID    string      `json:"step_id"`
+	StepSeq   int         `json:"step_seq,omitempty"`
+	Title     string      `json:"title,omitempty"`
+	RiskLevel string      `json:"risk_level,omitempty"`
+}
+
+type TaskStepLog struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TaskID    string      `json:"task_id"`
+	StepID    string      `json:"step_id"`
+	TextDelta string      `json:"text_delta,omitempty"`
+}
+
+type TaskStepCompleted struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TaskID    string      `json:"task_id"`
+	StepID    string      `json:"step_id"`
+	Status    string      `json:"status,omitempty"`
+}
+
+type TaskWaitingApproval struct {
+	Type             MessageType `json:"type"`
+	SessionID        string      `json:"session_id"`
+	TaskID           string      `json:"task_id"`
+	StepID           string      `json:"step_id"`
+	RiskLevel        string      `json:"risk_level,omitempty"`
+	Prompt           string      `json:"prompt,omitempty"`
+	RequiresApproval bool        `json:"requires_approval,omitempty"`
+}
+
+type TaskCompleted struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TaskID    string      `json:"task_id"`
+	Status    string      `json:"status,omitempty"`
+	Result    string      `json:"result,omitempty"`
+}
+
+type TaskFailed struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TaskID    string      `json:"task_id"`
+	StepID    string      `json:"step_id,omitempty"`
+	Status    string      `json:"status,omitempty"`
+	Code      string      `json:"code,omitempty"`
+	Detail    string      `json:"detail,omitempty"`
+}
+
+type TaskStatusSnapshotItem struct {
+	TaskID           string `json:"task_id"`
+	Summary          string `json:"summary"`
+	Status           string `json:"status"`
+	RiskLevel        string `json:"risk_level,omitempty"`
+	RequiresApproval bool   `json:"requires_approval,omitempty"`
+}
+
+type TaskStatusSnapshot struct {
+	Type             MessageType              `json:"type"`
+	SessionID        string                   `json:"session_id"`
+	Active           []TaskStatusSnapshotItem `json:"active"`
+	AwaitingApproval []TaskStatusSnapshotItem `json:"awaiting_approval"`
+	Planned          []TaskStatusSnapshotItem `json:"planned"`
+}
+
 type clientInbound struct {
 	Type        MessageType `json:"type"`
 	SessionID   string      `json:"session_id"`
@@ -104,6 +205,9 @@ type clientInbound struct {
 	SampleRate  int         `json:"sample_rate"`
 	TSMs        int64       `json:"ts_ms"`
 	Action      string      `json:"action"`
+	TaskID      string      `json:"task_id"`
+	Approved    *bool       `json:"approved"`
+	Scope       string      `json:"scope"`
 }
 
 func ParseClientMessage(raw []byte) (any, error) {
@@ -133,6 +237,9 @@ func ParseClientMessage(raw []byte) (any, error) {
 			Type:      TypeClientControl,
 			SessionID: inbound.SessionID,
 			Action:    inbound.Action,
+			TaskID:    inbound.TaskID,
+			Approved:  inbound.Approved,
+			Scope:     inbound.Scope,
 		}, nil
 	default:
 		return nil, ErrUnsupportedType

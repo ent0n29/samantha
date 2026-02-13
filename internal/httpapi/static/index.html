@@ -34,6 +34,39 @@
         <div id="captionSecondary" class="caption secondary"></div>
       </div>
 
+      <section id="taskDesk" class="task-desk" aria-label="Task Desk">
+        <div class="task-desk-head">
+          <div class="task-desk-title">Task Desk</div>
+          <div id="taskSync" class="task-sync">idle</div>
+        </div>
+
+        <div class="task-desk-groups">
+          <section class="task-group" aria-label="Active tasks">
+            <div class="task-group-head">
+              <h2>Active</h2>
+              <span id="taskCountActive" class="task-count">0</span>
+            </div>
+            <div id="taskListActive" class="task-list"></div>
+          </section>
+
+          <section class="task-group" aria-label="Tasks awaiting approval">
+            <div class="task-group-head">
+              <h2>Needs Approval</h2>
+              <span id="taskCountAwaiting" class="task-count">0</span>
+            </div>
+            <div id="taskListAwaiting" class="task-list"></div>
+          </section>
+
+          <section class="task-group" aria-label="Queued tasks">
+            <div class="task-group-head">
+              <h2>Queued</h2>
+              <span id="taskCountPlanned" class="task-count">0</span>
+            </div>
+            <div id="taskListPlanned" class="task-list"></div>
+          </section>
+        </div>
+      </section>
+
       <section id="onboard" class="onboard hidden" role="dialog" aria-modal="true" aria-label="Onboarding">
         <div class="onboard-card">
           <div class="onboard-head">
@@ -110,6 +143,7 @@
             <div><span class="key">Esc</span> interrupt</div>
             <div><span class="key">S</span> settings</div>
             <div><span class="key">D</span> debug</div>
+            <div><span class="key">Y/N/X</span> task approve/deny/cancel</div>
           </div>
         </div>
       </section>

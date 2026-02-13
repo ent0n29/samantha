@@ -103,13 +103,36 @@ func resolveVoiceProviders(cfg config.Config) (voiceSetup, error) {
 			cleanup:          nil,
 		}, nil
 	case "auto":
-		if setup, ok := tryElevenLabs(); ok {
-			return setup, nil
-		}
-		if setup, ok, err := tryLocal(false); err != nil {
+		elevenSetup, hasEleven := tryElevenLabs()
+		localSetup, hasLocal, err := tryLocal(false)
+		if err != nil {
 			return voiceSetup{}, err
-		} else if ok {
-			return setup, nil
+		}
+
+		if hasEleven && hasLocal {
+			stt, tts := voice.NewFailoverProviderPair(
+				elevenSetup.sttProvider,
+				elevenSetup.ttsProvider,
+				localSetup.sttProvider,
+				localSetup.ttsProvider,
+				localSetup.defaultVoiceID,
+				localSetup.defaultModelID,
+			)
+			return voiceSetup{
+				sttProvider:      stt,
+				ttsProvider:      tts,
+				resolvedProvider: "elevenlabs",
+				defaultVoiceID:   elevenSetup.defaultVoiceID,
+				defaultModelID:   elevenSetup.defaultModelID,
+				detail:           "elevenlabs realtime (automatic local fallback)",
+				cleanup:          localSetup.cleanup,
+			}, nil
+		}
+		if hasEleven {
+			return elevenSetup, nil
+		}
+		if hasLocal {
+			return localSetup, nil
 		}
 		p := voice.NewMockProvider()
 		return voiceSetup{

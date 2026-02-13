@@ -16,6 +16,9 @@ type Config struct {
 	SessionRetention         time.Duration
 	FirstAudioSLO            time.Duration
 	MetricsNamespace         string
+	TaskRuntimeEnabled       bool
+	TaskTimeout              time.Duration
+	TaskIdempotencyWindow    time.Duration
 
 	AllowAnyOrigin bool
 	StrictOutbound bool
@@ -48,6 +51,7 @@ type Config struct {
 	OpenClawAdapterMode      string
 	OpenClawHTTPURL          string
 	OpenClawCLIPath          string
+	OpenClawCLIThinking      string
 	OpenClawHTTPStreamStrict bool
 
 	DatabaseURL        string
@@ -60,7 +64,7 @@ func Load() (Config, error) {
 		BindAddr:            envOrDefault("APP_BIND_ADDR", ":8080"),
 		MetricsNamespace:    envOrDefault("APP_METRICS_NAMESPACE", "samantha"),
 		AllowAnyOrigin:      false,
-		VoiceProvider:       envOrDefault("VOICE_PROVIDER", "auto"),
+		VoiceProvider:       envOrDefault("VOICE_PROVIDER", "local"),
 		ElevenLabsWSBaseURL: envOrDefault("ELEVENLABS_WS_BASE_URL", "wss://api.elevenlabs.io"),
 		// Default to a warm female premade voice for the Samantha prototype.
 		ElevenLabsTTSVoice: envOrDefault("ELEVENLABS_TTS_VOICE_ID", "cgSgspJ2msm6clMCkdW9"),
@@ -85,6 +89,7 @@ func Load() (Config, error) {
 		OpenClawAdapterMode:      envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
 		OpenClawHTTPURL:          stringsTrimSpace("OPENCLAW_HTTP_URL"),
 		OpenClawCLIPath:          envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
+		OpenClawCLIThinking:      envOrDefault("OPENCLAW_CLI_THINKING", "low"),
 		ElevenLabsAPIKey:         stringsTrimSpace("ELEVENLABS_API_KEY"),
 		DatabaseURL:              stringsTrimSpace("DATABASE_URL"),
 		MemoryEmbeddingDim:       1536,
@@ -92,6 +97,9 @@ func Load() (Config, error) {
 		SessionInactivityTimeout: 2 * time.Minute,
 		SessionRetention:         24 * time.Hour,
 		FirstAudioSLO:            700 * time.Millisecond,
+		TaskRuntimeEnabled:       false,
+		TaskTimeout:              20 * time.Minute,
+		TaskIdempotencyWindow:    10 * time.Second,
 		StrictOutbound:           false,
 		UIAudioWorklet:           true,
 		WSBackpressureMode:       envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
@@ -114,6 +122,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.TaskTimeout, err = durationFromEnv("APP_TASK_TIMEOUT", cfg.TaskTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TaskIdempotencyWindow, err = durationFromEnv("APP_TASK_IDEMPOTENCY_WINDOW", cfg.TaskIdempotencyWindow)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.MemoryEmbeddingDim, err = intFromEnv("MEMORY_EMBEDDING_DIM", cfg.MemoryEmbeddingDim)
 	if err != nil {
 		return Config{}, err
@@ -127,6 +143,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.UIAudioWorklet, err = boolFromEnv("APP_UI_AUDIO_WORKLET", cfg.UIAudioWorklet)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.TaskRuntimeEnabled, err = boolFromEnv("APP_TASK_RUNTIME_ENABLED", cfg.TaskRuntimeEnabled)
 	if err != nil {
 		return Config{}, err
 	}
@@ -154,6 +174,12 @@ func Load() (Config, error) {
 	if cfg.SessionRetention < 0 {
 		return Config{}, fmt.Errorf("APP_SESSION_RETENTION must be >= 0")
 	}
+	if cfg.TaskTimeout <= 0 {
+		return Config{}, fmt.Errorf("APP_TASK_TIMEOUT must be > 0")
+	}
+	if cfg.TaskIdempotencyWindow <= 0 {
+		return Config{}, fmt.Errorf("APP_TASK_IDEMPOTENCY_WINDOW must be > 0")
+	}
 	cfg.WSBackpressureMode = strings.ToLower(trimSpace(cfg.WSBackpressureMode))
 	if cfg.WSBackpressureMode == "" {
 		cfg.WSBackpressureMode = "drop"
@@ -172,6 +198,15 @@ func Load() (Config, error) {
 	}
 	if cfg.LocalWhisperBestOf <= 0 {
 		return Config{}, fmt.Errorf("LOCAL_WHISPER_BEST_OF must be positive")
+	}
+	cfg.OpenClawCLIThinking = strings.ToLower(trimSpace(cfg.OpenClawCLIThinking))
+	if cfg.OpenClawCLIThinking == "" {
+		cfg.OpenClawCLIThinking = "low"
+	}
+	switch cfg.OpenClawCLIThinking {
+	case "minimal", "low", "medium", "high":
+	default:
+		return Config{}, fmt.Errorf("OPENCLAW_CLI_THINKING must be one of: minimal|low|medium|high")
 	}
 
 	return cfg, nil

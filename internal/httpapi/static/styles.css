@@ -268,6 +268,201 @@ body {
   text-wrap: pretty;
 }
 
+.task-desk {
+  position: fixed;
+  right: 16px;
+  top: 14px;
+  width: min(380px, calc(100vw - 32px));
+  max-height: calc(100vh - 28px);
+  border-radius: 18px;
+  border: 1px solid rgba(255, 198, 175, 0.14);
+  background: linear-gradient(160deg, rgba(11, 13, 20, 0.86) 0%, rgba(7, 8, 14, 0.8) 100%);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(16px);
+  padding: 10px;
+  display: none;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+  z-index: 18;
+}
+
+body.show-task-desk .task-desk {
+  display: grid;
+}
+
+.task-desk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 2px 0;
+}
+
+.task-desk-title {
+  font-size: 0.84rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: rgba(255, 236, 226, 0.8);
+  font-weight: 600;
+}
+
+.task-sync {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  color: rgba(255, 225, 206, 0.72);
+}
+
+.task-sync.is-synced {
+  color: rgba(120, 236, 168, 0.88);
+}
+
+.task-sync.is-hydrating {
+  color: rgba(103, 232, 249, 0.86);
+}
+
+.task-sync.is-degraded {
+  color: rgba(255, 145, 131, 0.9);
+}
+
+.task-desk-groups {
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  padding-right: 2px;
+}
+
+.task-group {
+  display: grid;
+  gap: 8px;
+}
+
+.task-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-group-head h2 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: rgba(255, 241, 232, 0.9);
+}
+
+.task-count {
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 198, 175, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 225, 206, 0.8);
+  text-align: center;
+  font-size: 0.73rem;
+}
+
+.task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.task-empty {
+  margin: 0;
+  padding: 10px 10px;
+  border-radius: 12px;
+  border: 1px dashed rgba(255, 198, 175, 0.18);
+  color: rgba(255, 236, 226, 0.5);
+  font-size: 0.8rem;
+}
+
+.task-card {
+  border-radius: 13px;
+  border: 1px solid rgba(255, 198, 175, 0.15);
+  background: rgba(255, 255, 255, 0.05);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.task-card[data-risk="high"] {
+  border-color: rgba(255, 150, 140, 0.3);
+}
+
+.task-card[data-risk="medium"] {
+  border-color: rgba(255, 180, 136, 0.24);
+}
+
+.task-card[data-risk="low"] {
+  border-color: rgba(120, 236, 168, 0.2);
+}
+
+.task-top {
+  display: grid;
+  gap: 5px;
+}
+
+.task-summary {
+  font-size: 0.88rem;
+  line-height: 1.35;
+  color: rgba(255, 241, 232, 0.92);
+}
+
+.task-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.74rem;
+  color: rgba(255, 225, 206, 0.67);
+}
+
+.task-status {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 198, 175, 0.2);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.task-note {
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: rgba(255, 236, 226, 0.72);
+}
+
+.task-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.task-action {
+  border: 1px solid rgba(255, 198, 175, 0.2);
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 241, 232, 0.92);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 0.74rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.task-action:hover {
+  filter: brightness(1.08);
+}
+
+.task-action[disabled] {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.task-action.is-danger {
+  border-color: rgba(255, 99, 92, 0.36);
+  color: rgba(255, 214, 212, 0.94);
+}
+
 .onboard {
   position: fixed;
   inset: 0;
@@ -668,6 +863,19 @@ select:focus,
 @media (max-width: 720px) {
   .perf-grid {
     grid-template-columns: 1fr;
+  }
+
+  .task-desk {
+    right: 10px;
+    left: 10px;
+    width: auto;
+    top: auto;
+    bottom: 10px;
+    max-height: min(56vh, 480px);
+  }
+
+  .task-desk-title {
+    font-size: 0.8rem;
   }
 }
 

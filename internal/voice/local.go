@@ -688,6 +688,7 @@ func startWhisperServer(modelPath, language string, threads, beamSize, bestOf in
 
 	tail := newTailBuffer(24 << 10)
 	cmd := exec.Command(path, args...)
+	injectWhisperLibraryEnv(cmd, path)
 	cmd.Stdout = tail
 	cmd.Stderr = tail
 
@@ -738,6 +739,78 @@ func pickFreePort() (int, error) {
 		return 0, fmt.Errorf("failed to allocate port")
 	}
 	return addr.Port, nil
+}
+
+func injectWhisperLibraryEnv(cmd *exec.Cmd, toolPath string) {
+	if cmd == nil {
+		return
+	}
+	toolPath = strings.TrimSpace(toolPath)
+	if toolPath == "" {
+		return
+	}
+
+	toolDir := filepath.Dir(toolPath)
+	candidates := []string{
+		filepath.Clean(filepath.Join(toolDir, "..", "lib")),
+		filepath.Clean(filepath.Join(toolDir, "lib")),
+	}
+	libDir := ""
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err == nil && info.IsDir() {
+			libDir = candidate
+			break
+		}
+	}
+	if libDir == "" {
+		return
+	}
+
+	env := cmd.Env
+	if len(env) == 0 {
+		env = os.Environ()
+	}
+	env = prependPathEnv(env, "DYLD_FALLBACK_LIBRARY_PATH", libDir)
+	env = prependPathEnv(env, "DYLD_LIBRARY_PATH", libDir)
+	cmd.Env = env
+}
+
+func prependPathEnv(env []string, key, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return env
+	}
+	prefix := key + "="
+	for i := range env {
+		if !strings.HasPrefix(env[i], prefix) {
+			continue
+		}
+		current := strings.TrimPrefix(env[i], prefix)
+		if pathListContains(current, value) {
+			return env
+		}
+		if strings.TrimSpace(current) == "" {
+			env[i] = prefix + value
+		} else {
+			env[i] = prefix + value + ":" + current
+		}
+		return env
+	}
+	return append(env, prefix+value)
+}
+
+func pathListContains(pathList, value string) bool {
+	value = filepath.Clean(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	for _, item := range strings.Split(pathList, ":") {
+		if filepath.Clean(strings.TrimSpace(item)) == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *whisperServer) Close() error {
@@ -952,6 +1025,7 @@ func (w whisperCPP) Transcribe(ctx context.Context, pcm16le []byte, sampleRate i
 	}
 
 	cmd := exec.CommandContext(ctx, w.cliPath, args...)
+	injectWhisperLibraryEnv(cmd, w.cliPath)
 	cmd.Stdout = io.Discard
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

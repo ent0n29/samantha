@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -17,10 +18,12 @@ type onboardingCheck struct {
 }
 
 type onboardingStatusResponse struct {
-	VoiceProvider  string            `json:"voice_provider"`
-	BrainProvider  string            `json:"brain_provider"`
-	UIAudioWorklet bool              `json:"ui_audio_worklet"`
-	Checks         []onboardingCheck `json:"checks"`
+	VoiceProvider      string            `json:"voice_provider"`
+	BrainProvider      string            `json:"brain_provider"`
+	TaskRuntimeEnabled bool              `json:"task_runtime_enabled"`
+	TaskStoreMode      string            `json:"task_store_mode"`
+	UIAudioWorklet     bool              `json:"ui_audio_worklet"`
+	Checks             []onboardingCheck `json:"checks"`
 }
 
 func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) {
@@ -30,6 +33,11 @@ func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) 
 	}
 
 	brainProvider, brainChecks := s.brainChecks()
+	taskRuntimeEnabled := s.taskService != nil && s.taskService.Enabled()
+	if s.taskService == nil {
+		taskRuntimeEnabled = s.cfg.TaskRuntimeEnabled
+	}
+	taskStoreMode := s.taskStoreMode()
 	checks := make([]onboardingCheck, 0, 12)
 	checks = append(checks, onboardingCheck{
 		ID:     "voice_provider",
@@ -37,6 +45,46 @@ func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) 
 		Label:  "Voice backend",
 		Detail: voiceProvider,
 	})
+	if taskRuntimeEnabled {
+		checks = append(checks, onboardingCheck{
+			ID:     "task_runtime",
+			Status: "ok",
+			Label:  "Task runtime",
+			Detail: fmt.Sprintf("enabled (%s store)", taskStoreMode),
+		})
+		switch taskStoreMode {
+		case "postgres":
+			checks = append(checks, onboardingCheck{
+				ID:     "task_store",
+				Status: "ok",
+				Label:  "Task persistence",
+				Detail: "postgres",
+			})
+		case "in-memory":
+			checks = append(checks, onboardingCheck{
+				ID:     "task_store",
+				Status: "warn",
+				Label:  "Task persistence",
+				Detail: "in-memory only",
+				Fix:    "Set DATABASE_URL to persist tasks across restarts.",
+			})
+		default:
+			checks = append(checks, onboardingCheck{
+				ID:     "task_store",
+				Status: "warn",
+				Label:  "Task persistence",
+				Detail: taskStoreMode,
+			})
+		}
+	} else {
+		checks = append(checks, onboardingCheck{
+			ID:     "task_runtime",
+			Status: "warn",
+			Label:  "Task runtime",
+			Detail: "disabled",
+			Fix:    "Set APP_TASK_RUNTIME_ENABLED=true to enable voice-to-task execution.",
+		})
+	}
 	checks = append(checks, brainChecks...)
 
 	switch voiceProvider {
@@ -77,10 +125,12 @@ func (s *Server) handleOnboardingStatus(w http.ResponseWriter, _ *http.Request) 
 	}
 
 	respondJSON(w, http.StatusOK, onboardingStatusResponse{
-		VoiceProvider:  voiceProvider,
-		BrainProvider:  brainProvider,
-		UIAudioWorklet: s.cfg.UIAudioWorklet,
-		Checks:         checks,
+		VoiceProvider:      voiceProvider,
+		BrainProvider:      brainProvider,
+		TaskRuntimeEnabled: taskRuntimeEnabled,
+		TaskStoreMode:      taskStoreMode,
+		UIAudioWorklet:     s.cfg.UIAudioWorklet,
+		Checks:             checks,
 	})
 }
 

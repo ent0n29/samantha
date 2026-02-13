@@ -50,6 +50,8 @@ Response (`200`):
 {
   "voice_provider": "local",
   "brain_provider": "cli",
+  "task_runtime_enabled": true,
+  "task_store_mode": "postgres",
   "ui_audio_worklet": true,
   "checks": [
     {
@@ -105,6 +107,66 @@ Request body:
 
 Response: raw audio bytes (`audio/wav`, `audio/mpeg`, or `application/octet-stream`).
 
+### `POST /v1/tasks`
+
+Creates a durable task for the given session.
+
+Request body:
+```json
+{
+  "session_id": "...",
+  "user_id": "anonymous",
+  "intent_text": "build a landing page and deploy it",
+  "mode": "auto",
+  "priority": "normal"
+}
+```
+
+Response (`201`):
+```json
+{
+  "task_id": "...",
+  "status": "planned",
+  "requires_approval": false,
+  "summary": "build a landing page and deploy it",
+  "deduped": false
+}
+```
+
+### `POST /v1/tasks/{id}/approve`
+
+Approves or denies a task waiting for approval.
+
+Request body:
+```json
+{
+  "approved": true
+}
+```
+
+### `GET /v1/tasks/{id}`
+
+Returns task details and step-level status.
+
+### `GET /v1/tasks?session_id=...&limit=20`
+
+Lists recent tasks for a session.
+
+### `POST /v1/tasks/{id}/cancel`
+
+Cancels a task.
+
+Request body (optional):
+```json
+{
+  "reason": "Cancelled by API."
+}
+```
+
+### `GET /v1/tasks/{id}/events?limit=100`
+
+Returns recent event history for one task (oldest to newest, capped by `limit`).
+
 ## WebSocket Protocol
 
 Client sends:
@@ -135,6 +197,7 @@ Known `action` values:
 - `interrupt`: cancel the current assistant turn (barge-in)
 - `wakeword_on`, `wakeword_off`
 - `manual_arm`: allow one wake-word-bypassed utterance in hands-free mode
+- `approve_task_step`, `deny_task_step`, `cancel_task`
 
 Server sends:
 
@@ -145,5 +208,14 @@ Server sends:
 - `assistant_turn_end`
 - `system_event` (e.g. `wake_word`)
 - `error_event`
+- `task_created`
+- `task_plan_delta`
+- `task_step_started`
+- `task_step_log`
+- `task_step_completed`
+- `task_waiting_approval`
+- `task_completed`
+- `task_failed`
+- `task_status_snapshot` (sent once on websocket connect when task runtime is enabled)
 
 Message schemas live in `internal/protocol/messages.go`.
