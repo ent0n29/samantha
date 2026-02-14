@@ -1058,7 +1058,7 @@ func (w whisperCPP) Transcribe(ctx context.Context, pcm16le []byte, sampleRate i
 		}
 		// Timeouts are expected when using heavy models; give a clear hint.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", fmt.Errorf("whisper.cpp timed out; use a smaller model (e.g. ggml-base.bin) or reduce utterance length")
+			return "", fmt.Errorf("whisper.cpp timed out; use a smaller model (e.g. ggml-tiny.en.bin) or reduce utterance length")
 		}
 		return "", fmt.Errorf("whisper.cpp failed: %s", detail)
 	}

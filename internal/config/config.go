@@ -28,6 +28,7 @@ type Config struct {
 	UITaskDeskDefault bool
 
 	UISilenceBreakerMode string
+	UIVADProfile         string
 
 	WSBackpressureMode string
 
@@ -84,8 +85,8 @@ func Load() (Config, error) {
 		// Prefer explicit commit driven by our client-side VAD and controls.
 		ElevenLabsSTTCommitStrategy: envOrDefault("ELEVENLABS_STT_COMMIT_STRATEGY", "manual"),
 		LocalWhisperCLI:             envOrDefault("LOCAL_WHISPER_CLI", "whisper-cli"),
-		// Default to a fast multilingual Whisper model for local realtime use.
-		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-base.bin"),
+		// Default to a very fast English Whisper model for local realtime use.
+		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-tiny.en.bin"),
 		LocalWhisperLanguage:  envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),
 		// 0 means "auto" (picked based on CPU count).
 		LocalWhisperThreads:       0,
@@ -119,6 +120,7 @@ func Load() (Config, error) {
 		UIAudioWorklet:            true,
 		UITaskDeskDefault:         false,
 		UISilenceBreakerMode:      envOrDefault("APP_UI_SILENCE_BREAKER_MODE", "visual"),
+		UIVADProfile:              envOrDefault("APP_UI_VAD_PROFILE", "snappy"),
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
@@ -248,6 +250,13 @@ func Load() (Config, error) {
 	}
 	if cfg.UISilenceBreakerMode != "off" && cfg.UISilenceBreakerMode != "visual" && cfg.UISilenceBreakerMode != "speech" {
 		return Config{}, fmt.Errorf("APP_UI_SILENCE_BREAKER_MODE must be one of: off|visual|speech")
+	}
+	cfg.UIVADProfile = strings.ToLower(trimSpace(cfg.UIVADProfile))
+	if cfg.UIVADProfile == "" {
+		cfg.UIVADProfile = "snappy"
+	}
+	if cfg.UIVADProfile != "snappy" && cfg.UIVADProfile != "default" {
+		return Config{}, fmt.Errorf("APP_UI_VAD_PROFILE must be one of: snappy|default")
 	}
 	if cfg.MemoryEmbeddingDim <= 0 {
 		return Config{}, fmt.Errorf("MEMORY_EMBEDDING_DIM must be positive")

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -43,6 +44,9 @@ type GatewayAdapter struct {
 	userAgent     string
 
 	dialer websocket.Dialer
+
+	poolMu sync.Mutex
+	pool   map[string]*pooledGatewayConn
 }
 
 type gatewayFrame struct {
@@ -184,6 +188,7 @@ func NewGatewayAdapter(wsURL, token, thinking string, streamMinChars int) (*Gate
 			Proxy:            http.ProxyFromEnvironment,
 			HandshakeTimeout: 4 * time.Second,
 		},
+		pool: make(map[string]*pooledGatewayConn),
 	}, nil
 }
 
@@ -341,19 +346,65 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 		runID = uuid.NewString()
 	}
 
+	if strings.HasPrefix(runID, "spec-") {
+		conn, ws, err := a.dialAndConnect(ctx)
+		if err != nil {
+			return MessageResponse{}, err
+		}
+		defer conn.Close()
+
+		resp, _, err := a.streamAgent(ctx, conn, ws, prompt, agentID, sessionKey, runID, onDelta)
+		return resp, err
+	}
+
+	pc := a.getPooledConn(sessionKey)
+	resp, keep, err := pc.stream(ctx, a, prompt, agentID, sessionKey, runID, onDelta)
+	if !keep {
+		a.dropPooledConn(sessionKey, pc)
+	}
+	return resp, err
+}
+
+func (a *GatewayAdapter) getPooledConn(sessionKey string) *pooledGatewayConn {
+	sessionKey = strings.TrimSpace(sessionKey)
+	a.poolMu.Lock()
+	defer a.poolMu.Unlock()
+	pc := a.pool[sessionKey]
+	if pc == nil {
+		pc = &pooledGatewayConn{}
+		a.pool[sessionKey] = pc
+	}
+	return pc
+}
+
+func (a *GatewayAdapter) dropPooledConn(sessionKey string, pc *pooledGatewayConn) {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" || pc == nil {
+		return
+	}
+	a.poolMu.Lock()
+	current := a.pool[sessionKey]
+	if current == pc {
+		delete(a.pool, sessionKey)
+	}
+	a.poolMu.Unlock()
+	pc.Close()
+}
+
+func (a *GatewayAdapter) dialAndConnect(ctx context.Context) (*websocket.Conn, *gatewayWS, error) {
 	conn, resp, err := a.dialer.DialContext(ctx, a.wsURL, nil)
 	if err != nil {
 		if resp != nil {
-			return MessageResponse{}, fmt.Errorf("openclaw gateway dial failed (%s): %w", resp.Status, err)
+			return nil, nil, fmt.Errorf("openclaw gateway dial failed (%s): %w", resp.Status, err)
 		}
-		return MessageResponse{}, fmt.Errorf("openclaw gateway dial failed: %w", err)
+		return nil, nil, fmt.Errorf("openclaw gateway dial failed: %w", err)
 	}
-	defer conn.Close()
 
 	ws := newGatewayWS(conn)
 	nonce, err := ws.readChallenge(ctx)
 	if err != nil {
-		return MessageResponse{}, err
+		_ = conn.Close()
+		return nil, nil, err
 	}
 
 	connectID := uuid.NewString()
@@ -393,12 +444,23 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 		},
 	}
 	if err := conn.WriteJSON(connectReq); err != nil {
-		return MessageResponse{}, fmt.Errorf("openclaw gateway connect write: %w", err)
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("openclaw gateway connect write: %w", err)
 	}
 	if err := ws.waitForResponseOK(ctx, connectID); err != nil {
-		return MessageResponse{}, err
+		_ = conn.Close()
+		return nil, nil, err
 	}
+	return conn, ws, nil
+}
 
+func (a *GatewayAdapter) streamAgent(
+	ctx context.Context,
+	conn *websocket.Conn,
+	ws *gatewayWS,
+	prompt, agentID, sessionKey, runID string,
+	onDelta DeltaHandler,
+) (MessageResponse, bool, error) {
 	agentReqID := uuid.NewString()
 	agentReq := gatewayRequest{
 		Type:   "req",
@@ -413,26 +475,29 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 		},
 	}
 	if err := conn.WriteJSON(agentReq); err != nil {
-		return MessageResponse{}, fmt.Errorf("openclaw gateway agent write: %w", err)
+		return MessageResponse{}, false, fmt.Errorf("openclaw gateway agent write: %w", err)
 	}
 
 	var (
 		outSB              strings.Builder
 		finalTextFromReply string
 		collector          = newDeltaStreamCollector(a.streamMinChars)
+		keepConn           = true
 	)
 
 	for {
 		frame, err := ws.nextFrame(ctx)
 		if err != nil {
+			keepConn = false
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return MessageResponse{}, err
+				_ = conn.Close()
+				return MessageResponse{}, false, err
 			}
 			// Websocket close after final response is normal; prefer what we already collected.
 			if finalTextFromReply != "" || outSB.Len() > 0 {
 				break
 			}
-			return MessageResponse{}, err
+			return MessageResponse{}, false, err
 		}
 
 		switch frame.Type {
@@ -463,7 +528,7 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 				for _, seg := range collector.Consume(delta) {
 					if err := onDelta(seg); err != nil {
 						_ = conn.Close()
-						return MessageResponse{}, err
+						return MessageResponse{}, false, err
 					}
 				}
 			}
@@ -476,7 +541,7 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 				if frame.Error != nil && strings.TrimSpace(frame.Error.Message) != "" {
 					msg = frame.Error.Message
 				}
-				return MessageResponse{}, fmt.Errorf("%s", msg)
+				return MessageResponse{}, false, fmt.Errorf("%s", msg)
 			}
 
 			// The agent method responds twice: an early ack (status=accepted) and a final response.
@@ -504,7 +569,7 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 				continue
 			}
 			if err := onDelta(seg); err != nil {
-				return MessageResponse{}, err
+				return MessageResponse{}, false, err
 			}
 		}
 	}
@@ -513,7 +578,7 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 	if finalText == "" {
 		finalText = strings.TrimSpace(outSB.String())
 	}
-	return MessageResponse{Text: finalText}, nil
+	return MessageResponse{Text: finalText}, keepConn, nil
 }
 
 type gatewayWS struct {
@@ -525,7 +590,7 @@ type gatewayWS struct {
 func newGatewayWS(conn *websocket.Conn) *gatewayWS {
 	ws := &gatewayWS{
 		conn: conn,
-		msgs: make(chan []byte, 64),
+		msgs: make(chan []byte, 256),
 		errs: make(chan error, 1),
 	}
 	go func() {

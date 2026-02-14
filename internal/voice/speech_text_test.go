@@ -19,3 +19,20 @@ func TestSanitizeSpeechText_StripsURLsAndMarkdownLinks(t *testing.T) {
 		t.Fatalf("sanitizeSpeechText() = %q, want %q", got, want)
 	}
 }
+
+func TestSpeechSanitizer_StripsFencedCodeAcrossDeltas(t *testing.T) {
+	s := newSpeechSanitizer()
+	a := s.SanitizeDelta("Here is the command:\n```bash\nrm -rf /tmp\n")
+	b := s.SanitizeDelta("```\nDone.\n")
+	got := a
+	if got != "" && b != "" {
+		got = got + " " + b
+	} else {
+		got = got + b
+	}
+	got = sanitizeSpeechText(got)
+	want := "Here is the command Done."
+	if got != want {
+		t.Fatalf("speechSanitizer combined = %q, want %q", got, want)
+	}
+}

@@ -45,6 +45,9 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.UITaskDeskDefault {
 		t.Fatalf("UITaskDeskDefault = true, want false")
 	}
+	if cfg.UIVADProfile != "snappy" {
+		t.Fatalf("UIVADProfile = %q, want %q", cfg.UIVADProfile, "snappy")
+	}
 }
 
 func TestLoadUsesExplicitOpenClawHTTPURL(t *testing.T) {
@@ -165,6 +168,7 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	t.Setenv("APP_UI_SILENCE_BREAKER_MODE", "off")
 	t.Setenv("APP_UI_SILENCE_BREAKER_DELAY", "1400ms")
 	t.Setenv("APP_UI_TASK_DESK_DEFAULT", "true")
+	t.Setenv("APP_UI_VAD_PROFILE", "default")
 	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
 
 	cfg, err := Load()
@@ -204,6 +208,9 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	if !cfg.UITaskDeskDefault {
 		t.Fatalf("UITaskDeskDefault = false, want true")
 	}
+	if cfg.UIVADProfile != "default" {
+		t.Fatalf("UIVADProfile = %q, want %q", cfg.UIVADProfile, "default")
+	}
 	if !cfg.OpenClawHTTPStreamStrict {
 		t.Fatalf("OpenClawHTTPStreamStrict = false, want true")
 	}
@@ -228,6 +235,7 @@ func setCoreEnvEmpty(t *testing.T) {
 		"APP_UI_SILENCE_BREAKER_MODE",
 		"APP_UI_SILENCE_BREAKER_DELAY",
 		"APP_UI_TASK_DESK_DEFAULT",
+		"APP_UI_VAD_PROFILE",
 		"APP_WS_BACKPRESSURE_MODE",
 		"VOICE_PROVIDER",
 		"ELEVENLABS_API_KEY",

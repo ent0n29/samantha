@@ -261,6 +261,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		activeToken  int64
 		nextToken    int64
 		lastSampleHz = 16000
+		lastStopAt   time.Time
 
 		wakewordEnabled    bool
 		manualArmUntil     time.Time
@@ -543,6 +544,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					_ = o.sessions.Interrupt(s.ID)
 					cancelActiveTurn("interrupted")
 				case "stop":
+					lastStopAt = time.Now()
 					_ = sttSession.SendAudioChunk(ctx, "", lastSampleHz, true)
 				case "approve_task_step":
 					if o.taskService != nil && o.taskService.Enabled() {
@@ -728,6 +730,10 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				committedText := strings.TrimSpace(evt.Text)
 				if committedText == "" {
 					continue
+				}
+				if !lastStopAt.IsZero() {
+					o.metrics.ObserveTurnStage("stop_to_stt_committed", time.Since(lastStopAt))
+					lastStopAt = time.Time{}
 				}
 				partialStableCanonical = ""
 				partialStableRepeats = 0
@@ -1133,9 +1139,13 @@ func (o *Orchestrator) runAssistantTurn(
 
 	firstAudioObserved := false
 	firstTextObserved := false
+	brainFirstDeltaObserved := false
+	brainFirstDeltaToAudioObserved := false
+	var brainFirstDeltaAt time.Time
 	speechProduced := false
 	speechSent := false
 	var speechPending strings.Builder
+	speechSan := newSpeechSanitizer()
 	firstTextSignal := make(chan struct{})
 	var firstTextSignalOnce sync.Once
 	markFirstTextObserved := func() {
@@ -1169,6 +1179,10 @@ func (o *Orchestrator) runAssistantTurn(
 							firstAudioObserved = true
 							o.metrics.ObserveTurnStage("commit_to_first_audio", time.Since(committedAt))
 							o.metrics.ObserveFirstAudioLatency(time.Since(start))
+							if brainFirstDeltaObserved && !brainFirstDeltaToAudioObserved && !brainFirstDeltaAt.IsZero() {
+								brainFirstDeltaToAudioObserved = true
+								o.metrics.ObserveTurnStage("brain_first_delta_to_first_audio", time.Since(brainFirstDeltaAt))
+							}
 						}
 						seq++
 						o.send(outbound, protocol.AssistantAudioChunk{
@@ -1290,6 +1304,11 @@ func (o *Orchestrator) runAssistantTurn(
 	var assistantOut string
 	leadFilter := newLeadResponseFilter()
 	handleDelta := func(delta string) error {
+		if !brainFirstDeltaObserved && strings.TrimSpace(delta) != "" {
+			brainFirstDeltaObserved = true
+			brainFirstDeltaAt = time.Now()
+			o.metrics.ObserveTurnStage("commit_to_brain_first_delta", time.Since(committedAt))
+		}
 		delta = leadFilter.Consume(delta)
 		if strings.TrimSpace(delta) == "" {
 			return nil
@@ -1306,7 +1325,7 @@ func (o *Orchestrator) runAssistantTurn(
 			TurnID:    turnID,
 			TextDelta: delta,
 		})
-		speechDelta := sanitizeSpeechText(delta)
+		speechDelta := speechSan.SanitizeDelta(delta)
 		if speechDelta == "" {
 			return nil
 		}
@@ -1369,7 +1388,7 @@ func (o *Orchestrator) runAssistantTurn(
 				TurnID:    turnID,
 				TextDelta: assistantOut,
 			})
-			speechOut := sanitizeSpeechText(assistantOut)
+			speechOut := speechSan.SanitizeDelta(assistantOut)
 			if speechOut != "" {
 				speechOut = bridgeSpeechDelta(assistantOut, speechOut, speechProduced)
 				speechProduced = true

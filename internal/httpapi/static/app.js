@@ -32,6 +32,19 @@ const VAD_SHORT_UTTERANCE_MS = 1500;
 const VAD_AUTO_COMMIT_SILENCE_MS = 390;
 const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 280;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 700;
+const VAD_PROFILE_DEFAULT = "snappy";
+const VAD_TUNING_DEFAULT = {
+  releaseFrames: VAD_RELEASE_FRAMES,
+  releaseFramesShort: VAD_RELEASE_FRAMES_SHORT,
+  autoCommitSilenceMs: VAD_AUTO_COMMIT_SILENCE_MS,
+  autoCommitSilenceShortMs: VAD_AUTO_COMMIT_SILENCE_SHORT_MS,
+};
+const VAD_TUNING_SNAPPY = {
+  releaseFrames: 5,
+  releaseFramesShort: 3,
+  autoCommitSilenceMs: 280,
+  autoCommitSilenceShortMs: 200,
+};
 const PLAYBACK_PREWARM_COOLDOWN_MS = 45_000;
 const PLAYBACK_PREWARM_DURATION_SEC = 0.03;
 const UI_SILENCE_BREAKER_MODE_DEFAULT = "visual";
@@ -121,6 +134,7 @@ const state = {
   vadSpeechStartMs: 0,
   vadPreroll: [],
   vadPrerollBytes: 0,
+  vadTuning: VAD_TUNING_SNAPPY,
 
   vizCtx: null,
   vizCSSW: 0,
@@ -142,6 +156,7 @@ const state = {
     silenceBreakerMode: UI_SILENCE_BREAKER_MODE_DEFAULT,
     silenceBreakerDelayMs: UI_SILENCE_BREAKER_DELAY_MS_DEFAULT,
     taskDeskDefault: false,
+    vadProfile: VAD_PROFILE_DEFAULT,
   },
 
   taskDesk: {
@@ -212,6 +227,7 @@ const el = {
 function init() {
   applySurfaceFlags();
   hydratePrefs();
+  applyVADTuning();
   wireUI();
   wireOnboarding();
   void loadUISettings();
@@ -234,7 +250,21 @@ function applySurfaceFlags() {
   document.body.classList.toggle("show-task-desk", shouldShowTaskDesk());
 }
 
+function isDebugUI() {
+  const qs = new URLSearchParams(window.location.search || "");
+  if (qs.get("debug") === "1") {
+    return true;
+  }
+  if (qs.get("debug") === "0") {
+    return false;
+  }
+  return localStorage.getItem("samantha.debug") === "1";
+}
+
 function shouldShowTaskDesk() {
+  if (!isDebugUI()) {
+    return false;
+  }
   const qs = new URLSearchParams(window.location.search || "");
   if (qs.get("taskdesk") === "1" || qs.get("tasks") === "1") {
     return true;
@@ -268,6 +298,20 @@ function normalizeSilenceBreakerDelayMs(raw) {
   return Math.min(UI_SILENCE_BREAKER_DELAY_MAX_MS, Math.max(UI_SILENCE_BREAKER_DELAY_MIN_MS, Math.round(ms)));
 }
 
+function normalizeVADProfile(raw) {
+  const profile = String(raw || "").trim().toLowerCase();
+  if (profile === "default" || profile === "snappy") {
+    return profile;
+  }
+  return VAD_PROFILE_DEFAULT;
+}
+
+function applyVADTuning() {
+  const profile = normalizeVADProfile(state.uiSettings.vadProfile);
+  state.uiSettings.vadProfile = profile;
+  state.vadTuning = profile === "default" ? VAD_TUNING_DEFAULT : VAD_TUNING_SNAPPY;
+}
+
 async function loadUISettings() {
   try {
     const res = await fetch("/v1/ui/settings", { cache: "no-store" });
@@ -290,6 +334,10 @@ async function loadUISettings() {
     if (Object.prototype.hasOwnProperty.call(payload, "silence_breaker_delay_ms")) {
       state.uiSettings.silenceBreakerDelayMs = normalizeSilenceBreakerDelayMs(payload.silence_breaker_delay_ms);
     }
+    if (Object.prototype.hasOwnProperty.call(payload, "vad_profile")) {
+      state.uiSettings.vadProfile = normalizeVADProfile(payload.vad_profile);
+    }
+    applyVADTuning();
     applySurfaceFlags();
     renderTaskDesk();
   } catch (_err) {
@@ -754,7 +802,11 @@ function hydratePrefs() {
   const savedUserId = localStorage.getItem("samantha.userId") || "antonio";
   const savedPersona = localStorage.getItem("samantha.persona") || "warm";
   const savedVoiceId = localStorage.getItem("samantha.voiceId") || "";
-  const savedHandsFree = localStorage.getItem("samantha.handsFree") === "1";
+  const handsFreeRaw = localStorage.getItem("samantha.handsFree");
+  const savedHandsFree = handsFreeRaw === null ? true : handsFreeRaw === "1";
+  if (handsFreeRaw === null) {
+    localStorage.setItem("samantha.handsFree", "1");
+  }
   el.userId.value = savedUserId;
   el.persona.value = savedPersona;
   state.voiceId = savedVoiceId;
@@ -1068,8 +1120,9 @@ function maybeAutoCommit() {
   }
   const now = Date.now();
   const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
+  const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
   const silenceTargetMs =
-    utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? VAD_AUTO_COMMIT_SILENCE_SHORT_MS : VAD_AUTO_COMMIT_SILENCE_MS;
+    utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.autoCommitSilenceShortMs : tuning.autoCommitSilenceMs;
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
   if (silenceMs < silenceTargetMs) {
@@ -1692,9 +1745,12 @@ async function refreshPerfLatency() {
 
 function orderedPerfStages(snapshot) {
   const stageOrder = [
+    "stop_to_stt_committed",
     "commit_to_tts_ready",
     "commit_to_context_ready",
+    "commit_to_brain_first_delta",
     "commit_to_first_text",
+    "brain_first_delta_to_first_audio",
     "commit_to_first_audio",
     "turn_total",
   ];
@@ -1716,12 +1772,18 @@ function orderedPerfStages(snapshot) {
 
 function displayStageName(stage) {
   switch (stage) {
+    case "stop_to_stt_committed":
+      return "stop->stt-committed";
     case "commit_to_tts_ready":
       return "commit->tts-ready";
     case "commit_to_context_ready":
       return "commit->context-ready";
+    case "commit_to_brain_first_delta":
+      return "commit->brain-first-delta";
     case "commit_to_first_text":
       return "commit->first-text";
+    case "brain_first_delta_to_first_audio":
+      return "brain-first-delta->first-audio";
     case "commit_to_first_audio":
       return "commit->first-audio";
     case "turn_total":
@@ -1823,6 +1885,9 @@ function sendControl(action, opts = {}) {
     session_id: state.sessionId,
     action,
   };
+  if (action === "stop") {
+    payload.ts_ms = Date.now();
+  }
   if (taskID) {
     payload.task_id = taskID;
   }
@@ -2514,7 +2579,8 @@ function processMicFrame(input, inputSampleRate) {
   flushQueuedMicPCM(now, false);
 
   const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
-  const releaseFrames = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? VAD_RELEASE_FRAMES_SHORT : VAD_RELEASE_FRAMES;
+  const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
+  const releaseFrames = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.releaseFramesShort : tuning.releaseFrames;
   if (!speechLike && state.vadSilenceFrames >= releaseFrames) {
     flushQueuedMicPCM(now, true);
     state.lastAutoCommitAtMs = now;

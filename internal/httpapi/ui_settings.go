@@ -8,6 +8,7 @@ type uiSettingsResponse struct {
 	TaskDeskDefault       bool   `json:"task_desk_default"`
 	SilenceBreakerMode    string `json:"silence_breaker_mode"`
 	SilenceBreakerDelayMS int64  `json:"silence_breaker_delay_ms"`
+	VADProfile            string `json:"vad_profile"`
 }
 
 func (s *Server) handleUISettings(w http.ResponseWriter, _ *http.Request) {
@@ -21,5 +22,6 @@ func (s *Server) handleUISettings(w http.ResponseWriter, _ *http.Request) {
 		TaskDeskDefault:       s.cfg.UITaskDeskDefault,
 		SilenceBreakerMode:    s.cfg.UISilenceBreakerMode,
 		SilenceBreakerDelayMS: s.cfg.UISilenceBreakerDelay.Milliseconds(),
+		VADProfile:            s.cfg.UIVADProfile,
 	})
 }

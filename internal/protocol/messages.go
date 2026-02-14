@@ -52,6 +52,7 @@ type ClientControl struct {
 	TaskID    string      `json:"task_id,omitempty"`
 	Approved  *bool       `json:"approved,omitempty"`
 	Scope     string      `json:"scope,omitempty"`
+	TSMs      int64       `json:"ts_ms,omitempty"`
 }
 
 type STTPartial struct {
@@ -240,6 +241,7 @@ func ParseClientMessage(raw []byte) (any, error) {
 			TaskID:    inbound.TaskID,
 			Approved:  inbound.Approved,
 			Scope:     inbound.Scope,
+			TSMs:      inbound.TSMs,
 		}, nil
 	default:
 		return nil, ErrUnsupportedType

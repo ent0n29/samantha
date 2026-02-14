@@ -109,9 +109,27 @@ def stage_eval(name, target):
     status = "ok" if not slow else "slow"
     return f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms n={samples} target={target:.0f} [{status}]", slow
 
+def stage_line(name):
+    item = stages.get(name)
+    if not item:
+        return f"{name}: n/a"
+    p95 = float(item.get("p95_ms", 0) or 0)
+    p50 = float(item.get("p50_ms", 0) or 0)
+    samples = int(item.get("samples", 0) or 0)
+    if samples <= 0:
+        return f"{name}: n/a"
+    tag = "warming" if samples < min_stage_samples else "measured"
+    return f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms n={samples} [{tag}]"
+
 line_text, fail_text = stage_eval("commit_to_first_text", target_text)
 line_audio, fail_audio = stage_eval("commit_to_first_audio", target_audio)
 line_total, fail_total = stage_eval("turn_total", target_total)
+
+extras = [
+    stage_line("stop_to_stt_committed"),
+    stage_line("commit_to_brain_first_delta"),
+    stage_line("brain_first_delta_to_first_audio"),
+]
 print(
     f"[{now}] "
     + line_text
@@ -119,6 +137,8 @@ print(
     + line_audio
     + " | "
     + line_total
+    + " || "
+    + " | ".join(extras)
 )
 if fail_on_targets and (fail_text or fail_audio or fail_total):
     raise SystemExit(2 if fail_early else 11)

@@ -13,6 +13,51 @@ var (
 	speechMarkdownLinkPattern = regexp.MustCompile(`\[(.*?)\]\((.*?)\)`)
 )
 
+type speechSanitizer struct {
+	inFence bool
+}
+
+func newSpeechSanitizer() *speechSanitizer { return &speechSanitizer{} }
+
+// SanitizeDelta removes code-fence blocks across streamed deltas before applying
+// sanitizeSpeechText. This prevents TTS from reading backticks, symbols, and code.
+func (s *speechSanitizer) SanitizeDelta(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	if s == nil {
+		return sanitizeSpeechText(raw)
+	}
+
+	var b strings.Builder
+	b.Grow(len(raw))
+
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '`' {
+			if !s.inFence {
+				b.WriteByte(raw[i])
+			}
+			continue
+		}
+
+		j := i
+		for j < len(raw) && raw[j] == '`' {
+			j++
+		}
+		count := j - i
+		i = j - 1
+
+		if count >= 3 {
+			s.inFence = !s.inFence
+			continue
+		}
+
+		// Drop single/double backticks (inline code markers).
+	}
+
+	return sanitizeSpeechText(b.String())
+}
+
 // sanitizeSpeechText removes markup/symbol noise from model text so TTS sounds conversational.
 func sanitizeSpeechText(raw string) string {
 	raw = strings.TrimSpace(raw)

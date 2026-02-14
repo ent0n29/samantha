@@ -284,10 +284,10 @@ if [[ "$needs_local_voice" == "1" ]]; then
     fi
   fi
 
-  if [[ "${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}" != /* ]]; then
-    model_path="$ROOT/${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}"
+  if [[ "${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-tiny.en.bin}" != /* ]]; then
+    model_path="$ROOT/${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-tiny.en.bin}"
   else
-    model_path="${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.bin}"
+    model_path="${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-tiny.en.bin}"
   fi
   if [[ ! -f "$model_path" ]]; then
     need_setup=1

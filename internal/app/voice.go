@@ -87,7 +87,18 @@ func resolveVoiceProviders(cfg config.Config) (voiceSetup, error) {
 		if setup, ok := tryElevenLabs(); ok {
 			return setup, nil
 		}
-		return voiceSetup{}, fmt.Errorf("VOICE_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set")
+		// Be forgiving: if the user asked for ElevenLabs but has no key/credits,
+		// fall back to local voice when available instead of failing hard.
+		localSetup, hasLocal, err := tryLocal(false)
+		if err != nil {
+			return voiceSetup{}, err
+		}
+		if hasLocal {
+			localSetup.resolvedProvider = "local"
+			localSetup.detail = "local (elevenlabs unavailable)"
+			return localSetup, nil
+		}
+		return voiceSetup{}, fmt.Errorf("VOICE_PROVIDER=elevenlabs but ELEVENLABS_API_KEY is not set (and local voice is unavailable)")
 	case "local":
 		setup, _, err := tryLocal(true)
 		return setup, err
