@@ -71,6 +71,7 @@ const (
 	brainPrefetchMinCanonical  = 18
 	brainPrefetchMinWords      = 3
 	brainPrefetchStableRepeats = 2
+	wakeWordWindow             = 30 * time.Second
 	memorySaveTimeout          = 2 * time.Second
 	ttsFinalizeTimeout         = 10 * time.Second
 )
@@ -671,17 +672,49 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			switch evt.Type {
 			case STTEventPartial:
 				partialText := strings.TrimSpace(evt.Text)
+				specText := partialText
 				if partialText != "" {
 					startMemoryPrefetch()
-					canonical := canonicalizeBrainPrefetchInput(partialText)
-					if canonical == partialStableCanonical {
-						partialStableRepeats++
-					} else {
-						partialStableCanonical = canonical
-						partialStableRepeats = 1
-					}
-					if partialStableRepeats >= brainPrefetchStableRepeats {
-						startBrainPrefetch(partialText, canonical)
+					if wakewordEnabled {
+						now := time.Now()
+						manualArmed := !manualArmUntil.IsZero() && now.Before(manualArmUntil)
+						awaitingQuery := !awaitingQueryUntil.IsZero() && now.Before(awaitingQueryUntil)
+
+						// Don't speculate the brain while we're "asleep" in hands-free mode. We still emit
+						// STT partials for debugging, but we avoid calling the brain until the wake word
+						// (or manual arm) is present.
+						hit, remainder := detectWakeWordCommitted(partialText)
+						if hit {
+							specText = remainder
+						}
+						if !manualArmed && !awaitingQuery && !hit {
+							// Reset stability tracking so we don't accidentally carry state across unrelated
+							// background speech while the wake word is off.
+							partialStableCanonical = ""
+							partialStableRepeats = 0
+						} else if strings.TrimSpace(specText) != "" {
+							canonical := canonicalizeBrainPrefetchInput(specText)
+							if canonical == partialStableCanonical {
+								partialStableRepeats++
+							} else {
+								partialStableCanonical = canonical
+								partialStableRepeats = 1
+							}
+							if partialStableRepeats >= brainPrefetchStableRepeats {
+								startBrainPrefetch(specText, canonical)
+							}
+						}
+					} else if strings.TrimSpace(specText) != "" {
+						canonical := canonicalizeBrainPrefetchInput(specText)
+						if canonical == partialStableCanonical {
+							partialStableRepeats++
+						} else {
+							partialStableCanonical = canonical
+							partialStableRepeats = 1
+						}
+						if partialStableRepeats >= brainPrefetchStableRepeats {
+							startBrainPrefetch(specText, canonical)
+						}
 					}
 				}
 				o.send(outbound, protocol.STTPartial{
@@ -723,7 +756,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 						hit, remainder := detectWakeWordCommitted(committedText)
 						if hit && strings.TrimSpace(remainder) == "" {
 							// The user repeated the wake word; keep the window open.
-							awaitingQueryUntil = now.Add(8 * time.Second)
+							awaitingQueryUntil = now.Add(wakeWordWindow)
 							o.send(outbound, protocol.SystemEvent{
 								Type:      protocol.TypeSystemEvent,
 								SessionID: s.ID,
@@ -733,30 +766,55 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							cancelBrainPrefetch()
 							continue
 						}
-						awaitingQueryUntil = time.Time{}
 						if hit && strings.TrimSpace(remainder) != "" {
+							// Wake word + query in one breath: still notify the UI and keep the awake window open.
+							o.send(outbound, protocol.SystemEvent{
+								Type:      protocol.TypeSystemEvent,
+								SessionID: s.ID,
+								Code:      "wake_word",
+								Detail:    "samantha",
+							})
 							committedText = remainder
 						}
+						// Accepted utterance while awake: keep the window open for follow-ups.
+						awaitingQueryUntil = now.Add(wakeWordWindow)
 					} else if manualArmed {
 						manualArmUntil = time.Time{}
 						hit, remainder := detectWakeWordCommitted(committedText)
-						if hit && strings.TrimSpace(remainder) != "" {
+						if hit {
+							// Manual-arm counts as "awake", but if the user includes the wake word anyway,
+							// strip it and keep the follow-up window open.
+							o.send(outbound, protocol.SystemEvent{
+								Type:      protocol.TypeSystemEvent,
+								SessionID: s.ID,
+								Code:      "wake_word",
+								Detail:    "samantha",
+							})
+							if strings.TrimSpace(remainder) == "" {
+								awaitingQueryUntil = now.Add(wakeWordWindow)
+								cancelBrainPrefetch()
+								continue
+							}
 							committedText = remainder
 						}
+						// After a manual-arm utterance, keep a short awake window for follow-ups.
+						awaitingQueryUntil = now.Add(wakeWordWindow)
 					} else {
 						hit, remainder := detectWakeWordCommitted(committedText)
 						if !hit {
 							cancelBrainPrefetch()
 							continue
 						}
+						// Wake word always opens (and refreshes) a short follow-up window so the user
+						// can continue talking naturally without repeating it every turn.
+						awaitingQueryUntil = now.Add(wakeWordWindow)
+						o.send(outbound, protocol.SystemEvent{
+							Type:      protocol.TypeSystemEvent,
+							SessionID: s.ID,
+							Code:      "wake_word",
+							Detail:    "samantha",
+						})
 						if strings.TrimSpace(remainder) == "" {
-							awaitingQueryUntil = now.Add(8 * time.Second)
-							o.send(outbound, protocol.SystemEvent{
-								Type:      protocol.TypeSystemEvent,
-								SessionID: s.ID,
-								Code:      "wake_word",
-								Detail:    "samantha",
-							})
 							cancelBrainPrefetch()
 							continue
 						}

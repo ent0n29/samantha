@@ -34,6 +34,8 @@ type Adapter interface {
 // Config controls adapter construction.
 type Config struct {
 	Mode              string
+	GatewayURL        string
+	GatewayToken      string
 	HTTPURL           string
 	CLIPath           string
 	CLIThinking       string
@@ -51,6 +53,8 @@ func NewAdapter(cfg Config) (Adapter, error) {
 	switch mode {
 	case "auto":
 		return newAutoAdapter(cfg), nil
+	case "gateway":
+		return NewGatewayAdapter(cfg.GatewayURL, cfg.GatewayToken, cfg.CLIThinking, cfg.CLIStreamMinChars)
 	case "cli":
 		if strings.TrimSpace(cfg.CLIPath) == "" {
 			return nil, errors.New("openclaw CLI path is required for cli mode")
@@ -69,6 +73,19 @@ func NewAdapter(cfg Config) (Adapter, error) {
 }
 
 func newAutoAdapter(cfg Config) Adapter {
+	secondary := newAutoAdapterNoGateway(cfg)
+
+	// Prefer the Gateway WS protocol when possible because it yields streaming assistant deltas.
+	if strings.TrimSpace(cfg.GatewayToken) != "" {
+		if gw, err := NewGatewayAdapter(cfg.GatewayURL, cfg.GatewayToken, cfg.CLIThinking, cfg.CLIStreamMinChars); err == nil {
+			return NewFallbackAdapter(gw, secondary)
+		}
+	}
+
+	return secondary
+}
+
+func newAutoAdapterNoGateway(cfg Config) Adapter {
 	cliPath := strings.TrimSpace(cfg.CLIPath)
 	if cliPath != "" {
 		if _, err := exec.LookPath(cliPath); err == nil {

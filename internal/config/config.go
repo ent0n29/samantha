@@ -54,6 +54,8 @@ type Config struct {
 	LocalKokoroLangCode     string
 
 	OpenClawAdapterMode       string
+	OpenClawGatewayURL        string
+	OpenClawGatewayToken      string
 	OpenClawHTTPURL           string
 	OpenClawCLIPath           string
 	OpenClawCLIThinking       string
@@ -94,6 +96,8 @@ func Load() (Config, error) {
 		LocalKokoroVoice:          envOrDefault("LOCAL_KOKORO_VOICE", "af_heart"),
 		LocalKokoroLangCode:       envOrDefault("LOCAL_KOKORO_LANG_CODE", "a"),
 		OpenClawAdapterMode:       envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
+		OpenClawGatewayURL:        envOrDefault("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:18789"),
+		OpenClawGatewayToken:      stringsTrimSpace("OPENCLAW_GATEWAY_TOKEN"),
 		OpenClawHTTPURL:           stringsTrimSpace("OPENCLAW_HTTP_URL"),
 		OpenClawCLIPath:           envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
 		OpenClawCLIThinking:       envOrDefault("OPENCLAW_CLI_THINKING", "minimal"),
@@ -118,6 +122,18 @@ func Load() (Config, error) {
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
+
+	// Convenience: if the gateway token isn't set in the environment, try the per-repo
+	// token file used by `scripts/dev` (gitignored). This makes the fast WS streaming
+	// path work even when starting the server without `make dev`.
+	if strings.TrimSpace(cfg.OpenClawGatewayToken) == "" {
+		if raw, err := os.ReadFile(".tmp/openclaw_gateway_token"); err == nil {
+			if tok := strings.TrimSpace(string(raw)); tok != "" {
+				cfg.OpenClawGatewayToken = tok
+			}
+		}
+	}
+
 	var err error
 	cfg.ShutdownTimeout, err = durationFromEnv("APP_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout)
 	if err != nil {

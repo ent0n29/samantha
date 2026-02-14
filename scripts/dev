@@ -46,6 +46,53 @@ if [[ -f "$ROOT/.env" ]]; then
   set +a
 fi
 
+# OpenClaw Gateway (WS) is the fastest path for streaming assistant deltas.
+# Generate a per-repo token once (gitignored) so `make dev` can start/connect
+# without requiring manual config. Avoid clobbering a user-managed gateway token
+# when a gateway is already running on the port.
+gateway_port="18789"
+gateway_listening=0
+if command -v lsof >/dev/null 2>&1; then
+  if lsof -nP -iTCP:"$gateway_port" -sTCP:LISTEN >/dev/null 2>&1; then
+    gateway_listening=1
+  fi
+elif command -v nc >/dev/null 2>&1; then
+  if nc -z 127.0.0.1 "$gateway_port" >/dev/null 2>&1; then
+    gateway_listening=1
+  fi
+fi
+
+if [[ -z "${OPENCLAW_GATEWAY_URL:-}" ]]; then
+  export OPENCLAW_GATEWAY_URL="ws://127.0.0.1:18789"
+fi
+
+mkdir -p "$ROOT/.tmp" >/dev/null 2>&1 || true
+gateway_pid_file="$ROOT/.tmp/openclaw_gateway.pid"
+token_file="$ROOT/.tmp/openclaw_gateway_token"
+
+if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
+  if [[ "$gateway_listening" == "0" ]]; then
+    if [[ -f "$token_file" ]]; then
+      export OPENCLAW_GATEWAY_TOKEN="$(cat "$token_file" 2>/dev/null || true)"
+    fi
+    if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
+      export OPENCLAW_GATEWAY_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))' 2>/dev/null || true)"
+      echo -n "$OPENCLAW_GATEWAY_TOKEN" >"$token_file" 2>/dev/null || true
+      chmod 600 "$token_file" >/dev/null 2>&1 || true
+    fi
+  else
+    # Only auto-load the token when the gateway was started by this script (pid file present).
+    if [[ -f "$gateway_pid_file" ]]; then
+      pid="$(cat "$gateway_pid_file" 2>/dev/null || true)"
+      if [[ -n "$pid" ]] && ps -p "$pid" >/dev/null 2>&1; then
+        if [[ -f "$token_file" ]]; then
+          export OPENCLAW_GATEWAY_TOKEN="$(cat "$token_file" 2>/dev/null || true)"
+        fi
+      fi
+    fi
+  fi
+fi
+
 AUTH_MAIN="$HOME/.openclaw/agents/main/agent/auth-profiles.json"
 AUTH_SAM="$HOME/.openclaw/agents/${OPENCLAW_AGENT_ID}/agent/auth-profiles.json"
 
@@ -148,6 +195,20 @@ print(f"{exists}|{ws.strip()}")' "$AGENT_ID" 2>/dev/null || echo "0|")"
     mkdir -p "$(dirname "$AUTH_SAM")" || true
     cp -f "$AUTH_MAIN" "$AUTH_SAM" || true
     chmod 600 "$AUTH_SAM" >/dev/null 2>&1 || true
+  fi
+fi
+
+# Start the OpenClaw Gateway on loopback if it's not already listening.
+# This enables the WS adapter (streaming) and avoids the non-streaming CLI path.
+if command -v openclaw >/dev/null 2>&1; then
+  if [[ "$gateway_listening" == "0" && -n "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
+    (
+      export OPENCLAW_GATEWAY_TOKEN="$OPENCLAW_GATEWAY_TOKEN"
+      export OPENCLAW_GATEWAY_URL="$OPENCLAW_GATEWAY_URL"
+      openclaw gateway --allow-unconfigured --bind loopback --port "$gateway_port" \
+        >"$ROOT/.tmp/openclaw_gateway.log" 2>&1
+    ) &
+    echo $! >"$gateway_pid_file" 2>/dev/null || true
   fi
 fi
 

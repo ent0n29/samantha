@@ -101,7 +101,9 @@ func firstRune(s string) (rune, bool) {
 
 func isSpeechSafePunctuation(r rune) bool {
 	switch r {
-	case '.', ',', '!', '?', ':', ';', '\'', '"', '-', '(', ')':
+	// Keep only punctuation that sounds natural when spoken. Many TTS engines
+	// will literally say "colon" / "open parenthesis" etc, which breaks flow.
+	case '.', ',', '!', '?', '\'', '"', '-':
 		return true
 	default:
 		return false

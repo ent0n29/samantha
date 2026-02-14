@@ -11,6 +11,24 @@ func TestLeadResponseFilterStripsSingleChunkFillerPrefix(t *testing.T) {
 	}
 }
 
+func TestLeadResponseFilterStripsUnicodePunctuationFillerPrefix(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("Give me a second while I think… We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
+func TestLeadResponseFilterStripsUnicodeDashFillerPrefix(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("Give me a second while I think—We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
 func TestLeadResponseFilterStripsSecVariant(t *testing.T) {
 	f := newLeadResponseFilter()
 	got := f.Consume("One sec while I think. We can ship this today.")

@@ -43,8 +43,12 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 		return nil, fmt.Errorf("memory store init failed: %w", err)
 	}
 
+	gatewayCmd, _ := maybeAutoStartOpenClawGateway(cfg)
+
 	adapter, err := openclaw.NewAdapter(openclaw.Config{
 		Mode:              cfg.OpenClawAdapterMode,
+		GatewayURL:        cfg.OpenClawGatewayURL,
+		GatewayToken:      cfg.OpenClawGatewayToken,
 		HTTPURL:           cfg.OpenClawHTTPURL,
 		CLIPath:           cfg.OpenClawCLIPath,
 		CLIThinking:       cfg.OpenClawCLIThinking,
@@ -101,6 +105,11 @@ func Build(ctx context.Context, cfg config.Config) (*BuildResult, error) {
 
 	cleanup := func() error {
 		var errs []string
+		if gatewayCmd != nil {
+			if err := stopProcessBestEffort(gatewayCmd); err != nil {
+				errs = append(errs, fmt.Sprintf("openclaw gateway: %v", err))
+			}
+		}
 		if taskService != nil {
 			if err := taskService.Close(); err != nil {
 				errs = append(errs, err.Error())

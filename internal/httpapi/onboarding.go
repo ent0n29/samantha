@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type onboardingCheck struct {
@@ -262,11 +265,122 @@ func (s *Server) brainChecks() (string, []onboardingCheck) {
 		cli = "openclaw"
 	}
 	httpURL := strings.TrimSpace(s.cfg.OpenClawHTTPURL)
+	gatewayURL := strings.TrimSpace(s.cfg.OpenClawGatewayURL)
+	gatewayToken := strings.TrimSpace(s.cfg.OpenClawGatewayToken)
 
 	var resolved string
-	checks := make([]onboardingCheck, 0, 3)
+	checks := make([]onboardingCheck, 0, 6)
+
+	stateDir := strings.TrimSpace(os.Getenv("OPENCLAW_STATE_DIR"))
+	if stateDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			stateDir = filepath.Join(home, ".openclaw")
+		}
+	}
+	identityPath := ""
+	if stateDir != "" {
+		identityPath = filepath.Join(stateDir, "identity", "device.json")
+	}
+	probeGatewayPort := func(raw string) error {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			raw = "ws://127.0.0.1:18789"
+		}
+		u, err := url.Parse(raw)
+		if err != nil {
+			return err
+		}
+		host := strings.TrimSpace(u.Host)
+		if host == "" {
+			return fmt.Errorf("host missing")
+		}
+		addr := host
+		if !strings.Contains(host, ":") {
+			// Fallback to a conservative default.
+			addr = net.JoinHostPort(host, "80")
+		}
+		c, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err != nil {
+			return err
+		}
+		_ = c.Close()
+		return nil
+	}
+	checkGateway := func(level string) bool {
+		level = strings.ToLower(strings.TrimSpace(level))
+		status := ""
+		switch level {
+		case "error", "fatal":
+			status = "error"
+		case "warn", "warning":
+			status = "warn"
+		case "silent", "":
+			status = ""
+		default:
+			status = "warn"
+		}
+
+		if strings.TrimSpace(gatewayToken) == "" {
+			if status != "" {
+				checks = append(checks, onboardingCheck{
+					ID:     "brain_gateway_token",
+					Status: status,
+					Label:  "Brain (OpenClaw Gateway)",
+					Detail: "OPENCLAW_GATEWAY_TOKEN is missing",
+					Fix:    "Run `make dev` (auto-generates .tmp/openclaw_gateway_token) or set OPENCLAW_GATEWAY_TOKEN.",
+				})
+			}
+			return false
+		}
+		if identityPath == "" {
+			if status != "" {
+				checks = append(checks, onboardingCheck{
+					ID:     "brain_gateway_identity",
+					Status: status,
+					Label:  "Brain (OpenClaw Gateway)",
+					Detail: "cannot resolve OpenClaw identity path",
+					Fix:    "Ensure HOME/OPENCLAW_STATE_DIR is set so OpenClaw state can be located.",
+				})
+			}
+			return false
+		}
+		if _, err := os.Stat(identityPath); err != nil {
+			if status != "" {
+				checks = append(checks, onboardingCheck{
+					ID:     "brain_gateway_identity",
+					Status: status,
+					Label:  "Brain (OpenClaw Gateway)",
+					Detail: fmt.Sprintf("missing device identity (%s)", identityPath),
+					Fix:    "Run `openclaw` once (or `make dev`) so OpenClaw creates identity/device.json.",
+				})
+			}
+			return false
+		}
+		if err := probeGatewayPort(gatewayURL); err != nil {
+			if status != "" {
+				checks = append(checks, onboardingCheck{
+					ID:     "brain_gateway_port",
+					Status: status,
+					Label:  "Brain (OpenClaw Gateway)",
+					Detail: fmt.Sprintf("gateway not reachable (%s)", strings.TrimSpace(gatewayURL)),
+					Fix:    "Start the gateway: `openclaw gateway --bind loopback --port 18789` (or run `make dev`).",
+				})
+			}
+			return false
+		}
+		checks = append(checks, onboardingCheck{
+			ID:     "brain_gateway",
+			Status: "ok",
+			Label:  "Brain (OpenClaw Gateway)",
+			Detail: "streaming enabled",
+		})
+		return true
+	}
 
 	switch mode {
+	case "gateway":
+		resolved = "gateway"
+		_ = checkGateway("error")
 	case "cli":
 		resolved = "cli"
 		if _, err := exec.LookPath(cli); err != nil {
@@ -313,6 +427,12 @@ func (s *Server) brainChecks() (string, []onboardingCheck) {
 			Fix:    "Install OpenClaw and use OPENCLAW_ADAPTER_MODE=auto.",
 		})
 	case "auto":
+		if strings.TrimSpace(gatewayToken) != "" {
+			if checkGateway("warn") {
+				resolved = "gateway"
+				return resolved, checks
+			}
+		}
 		if cli != "" {
 			if _, err := exec.LookPath(cli); err == nil {
 				resolved = "cli"
@@ -341,7 +461,7 @@ func (s *Server) brainChecks() (string, []onboardingCheck) {
 			Status: "warn",
 			Label:  "Brain (mock)",
 			Detail: "OpenClaw not configured.",
-			Fix:    "Install OpenClaw, or set OPENCLAW_HTTP_URL.",
+			Fix:    "Install OpenClaw, or set OPENCLAW_GATEWAY_TOKEN/OPENCLAW_HTTP_URL.",
 		})
 	default:
 		resolved = "mock"

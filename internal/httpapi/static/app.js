@@ -43,6 +43,7 @@ const THINKING_CUE_DURATION_SEC = 0.12;
 const THINKING_CUE_GAIN = 0.045;
 const THINKING_CUE_FREQ_START_HZ = 690;
 const THINKING_CUE_FREQ_END_HZ = 560;
+const HANDSFREE_AWAKE_WINDOW_MS = 30_000;
 
 const state = {
   sessionId: "",
@@ -239,6 +240,9 @@ function shouldShowTaskDesk() {
     return true;
   }
   if (qs.get("taskdesk") === "0" || qs.get("tasks") === "0") {
+    return false;
+  }
+  if (!state.taskDesk.runtimeEnabled) {
     return false;
   }
   return Boolean(state.uiSettings.taskDeskDefault);
@@ -535,7 +539,7 @@ function wireOnboarding() {
         await requestMicPermission();
         await refreshMicPermission();
         renderOnboarding();
-        setCaption("Microphone enabled.", "Press Space to talk.", { clearAfterMs: 2600 });
+        setCaption("Microphone enabled.", "Press Space to toggle mic.", { clearAfterMs: 2600 });
       } catch (err) {
         renderOnboarding();
         setCaption("Microphone blocked.", stringifyError(err), { clearAfterMs: 4200 });
@@ -2436,6 +2440,7 @@ function processMicFrame(input, inputSampleRate) {
   }
 
   const now = Date.now();
+  const attackFrames = state.handsFree ? VAD_ATTACK_FRAMES : Math.max(1, VAD_ATTACK_FRAMES - 1);
 
   if (state.presence === "speaking" && !state.bargeInActive) {
     // Flush any pending client-audio batch before we move into half-duplex hold.
@@ -2476,14 +2481,9 @@ function processMicFrame(input, inputSampleRate) {
     clearBargePreroll();
   }
 
-  // Push-to-talk mode: stream continuously (commit is driven by the Stop control).
-  if (!state.handsFree) {
-    queueMicPCM(pcmBytes, now);
-    flushQueuedMicPCM(now, false);
-    return;
-  }
-
   // VAD-gated streaming: only send audio to the backend while we're inside an utterance.
+  // This keeps the UX "talk naturally": we auto-commit on a short silence instead of
+  // requiring a manual stop, even in push-to-talk mode.
   if (!state.vadStreaming) {
     pushVADPreroll(pcmBytes);
     if (speechLike) {
@@ -2491,7 +2491,7 @@ function processMicFrame(input, inputSampleRate) {
     } else {
       state.vadSpeechFrames = Math.max(0, state.vadSpeechFrames - 1);
     }
-    if (state.vadSpeechFrames >= VAD_ATTACK_FRAMES) {
+    if (state.vadSpeechFrames >= attackFrames) {
       state.vadStreaming = true;
       state.vadSilenceFrames = 0;
       state.vadSpeechStartMs = now;
@@ -2636,6 +2636,14 @@ async function stopMic({ sendStop }) {
   if (!state.micActive && !state.audioContext && !state.mediaStream) {
     return;
   }
+  const hadSpeechCandidate = state.vadStreaming || state.sawSpeech || state.vadSpeechFrames > 0 || state.micTxBytes > 0;
+  const shouldSendStop = Boolean(sendStop && state.sessionId && hadSpeechCandidate);
+
+  if (shouldSendStop && state.vadPrerollBytes > 0 && (state.vadSpeechFrames > 0 || state.sawSpeech)) {
+    // If the user stops the mic mid-utterance before we fully entered streaming mode,
+    // flush the preroll so the backend still has something to transcribe/commit.
+    flushVADPreroll();
+  }
   flushQueuedMicPCM(Date.now(), true);
   state.micActive = false;
   state.micEnergyTarget = 0;
@@ -2687,7 +2695,7 @@ async function stopMic({ sendStop }) {
     setPresence("disconnected", "Samantha", "Disconnected.");
   }
 
-  if (sendStop && state.sessionId) {
+  if (shouldSendStop) {
     sendControl("stop");
   }
   logEvent("microphone stopped");
@@ -2717,8 +2725,15 @@ function handleServerMessage(raw) {
       state.bargeInActive = false;
       state.bargeInFrames = 0;
       clearBargePreroll();
-      state.awakeUntilMs = 0;
-      state.manualArmUntilMs = 0;
+      if (state.handsFree) {
+        // Keep the wake window open for follow-ups so the user doesn't need to repeat the wake word
+        // after every turn.
+        state.awakeUntilMs = Math.max(state.awakeUntilMs, Date.now() + HANDSFREE_AWAKE_WINDOW_MS);
+        state.manualArmUntilMs = 0;
+      } else {
+        state.awakeUntilMs = 0;
+        state.manualArmUntilMs = 0;
+      }
       state.awaitingAssistantResponse = true;
       clearSilenceBreakerTimer();
       setPresence("thinking", "", "");
@@ -2785,7 +2800,7 @@ function handleSystemEvent(msg) {
   const code = String(msg.code || "").toLowerCase();
   switch (code) {
     case "wake_word":
-      state.awakeUntilMs = Date.now() + 8000;
+      state.awakeUntilMs = Date.now() + HANDSFREE_AWAKE_WINDOW_MS;
       setPresence("listening", "Yes?", "");
       setCaption("Yes?", "", { clearAfterMs: 1200 });
       logEvent("wake word detected");
@@ -2877,8 +2892,14 @@ function handleAssistantTurnEnd(msg) {
     playBufferedTurnAudio(turnID);
   }
 
-  state.awakeUntilMs = 0;
-  state.manualArmUntilMs = 0;
+  if (state.handsFree) {
+    // After Samantha finishes talking, keep the awake window open briefly so the user can reply naturally.
+    state.awakeUntilMs = Date.now() + HANDSFREE_AWAKE_WINDOW_MS;
+    state.manualArmUntilMs = 0;
+  } else {
+    state.awakeUntilMs = 0;
+    state.manualArmUntilMs = 0;
+  }
 
   if (state.micActive && state.handsFree) {
     setPresence("connected", "Samantha", "");
