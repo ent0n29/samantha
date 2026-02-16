@@ -17,10 +17,22 @@ MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES:-5}"
 FAIL_EARLY="${FAIL_EARLY:-0}"
 RESET_WINDOW="${RESET_WINDOW:-1}"
 REQUIRE_MIN_STAGE_SAMPLES="${REQUIRE_MIN_STAGE_SAMPLES:-1}"
+AUTO_REPLAY="${AUTO_REPLAY:-1}"
+AUTO_REPLAY_STRICT="${AUTO_REPLAY_STRICT:-1}"
+AUTO_REPLAY_TURNS="${AUTO_REPLAY_TURNS:-10}"
+AUTO_REPLAY_CHUNK_MS="${AUTO_REPLAY_CHUNK_MS:-45}"
+AUTO_REPLAY_REALTIME="${AUTO_REPLAY_REALTIME:-3.0}"
+AUTO_REPLAY_START_DELAY_MS="${AUTO_REPLAY_START_DELAY_MS:-900}"
+AUTO_REPLAY_INTER_TURN_MS="${AUTO_REPLAY_INTER_TURN_MS:-180}"
+AUTO_REPLAY_TURN_TIMEOUT_MS="${AUTO_REPLAY_TURN_TIMEOUT_MS:-15000}"
 
 echo "Local-first latency baseline (VOICE_PROVIDER=local expected)"
 echo "interval=${INTERVAL_SEC}s samples=${SAMPLES} fail_on_targets=${FAIL_ON_TARGETS} require_samples=${REQUIRE_SAMPLES} min_stage_samples=${MIN_STAGE_SAMPLES} fail_early=${FAIL_EARLY} reset_window=${RESET_WINDOW}"
-echo "Tip: talk to Samantha while this runs so latency stages are populated."
+if [[ "${AUTO_REPLAY}" == "1" ]]; then
+  echo "Auto replay: enabled (turns=${AUTO_REPLAY_TURNS}, chunk_ms=${AUTO_REPLAY_CHUNK_MS}, realtime=${AUTO_REPLAY_REALTIME})"
+else
+  echo "Tip: talk to Samantha while this runs so latency stages are populated."
+fi
 
 onboarding_json="$(curl -fsS "${BASE_URL%/}/v1/onboarding/status" || true)"
 if [[ -n "${onboarding_json}" ]]; then
@@ -43,6 +55,31 @@ PY
   fi
 fi
 
+replay_pid=""
+replay_rc=0
+probe_rc=0
+
+cleanup() {
+  if [[ -n "${replay_pid}" ]]; then
+    if kill -0 "${replay_pid}" >/dev/null 2>&1; then
+      kill "${replay_pid}" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+trap cleanup EXIT
+
+if [[ "${AUTO_REPLAY}" == "1" ]]; then
+  PERF_REPLAY_TURNS="${AUTO_REPLAY_TURNS}" \
+  PERF_REPLAY_CHUNK_MS="${AUTO_REPLAY_CHUNK_MS}" \
+  PERF_REPLAY_REALTIME="${AUTO_REPLAY_REALTIME}" \
+  PERF_REPLAY_START_DELAY_MS="${AUTO_REPLAY_START_DELAY_MS}" \
+  PERF_REPLAY_INTER_TURN_MS="${AUTO_REPLAY_INTER_TURN_MS}" \
+  PERF_REPLAY_TURN_TIMEOUT_MS="${AUTO_REPLAY_TURN_TIMEOUT_MS}" \
+  PERF_REPLAY_VERBOSE="${PERF_REPLAY_VERBOSE:-1}" \
+    "${ROOT}/scripts/perf_voice_replay.sh" "${BASE_URL}" &
+  replay_pid=$!
+fi
+
 INTERVAL_SEC="${INTERVAL_SEC}" \
 SAMPLES="${SAMPLES}" \
 TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS}" \
@@ -55,4 +92,22 @@ MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES}" \
 FAIL_EARLY="${FAIL_EARLY}" \
 RESET_WINDOW="${RESET_WINDOW}" \
 REQUIRE_MIN_STAGE_SAMPLES="${REQUIRE_MIN_STAGE_SAMPLES}" \
-  "${ROOT}/scripts/perf_latency_probe.sh" "${BASE_URL}"
+  "${ROOT}/scripts/perf_latency_probe.sh" "${BASE_URL}" || probe_rc=$?
+
+if [[ -n "${replay_pid}" ]]; then
+  if kill -0 "${replay_pid}" >/dev/null 2>&1; then
+    # Probe window is complete; stop replay so the benchmark exits promptly.
+    kill "${replay_pid}" >/dev/null 2>&1 || true
+    wait "${replay_pid}" >/dev/null 2>&1 || true
+  else
+    wait "${replay_pid}" || replay_rc=$?
+    if [[ "${replay_rc}" -ne 0 ]]; then
+      echo "warning: auto replay exited with code ${replay_rc}"
+      if [[ "${AUTO_REPLAY_STRICT}" == "1" && "${probe_rc}" -eq 0 ]]; then
+        probe_rc="${replay_rc}"
+      fi
+    fi
+  fi
+fi
+
+exit "${probe_rc}"
