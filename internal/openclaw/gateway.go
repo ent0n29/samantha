@@ -22,6 +22,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	gatewayConnectWriteTimeout = 3 * time.Second
+	gatewayAgentWriteTimeout   = 2 * time.Second
+)
+
 // GatewayAdapter streams responses from the OpenClaw Gateway WebSocket protocol.
 //
 // This is the only OpenClaw path that reliably yields early assistant deltas
@@ -443,7 +448,7 @@ func (a *GatewayAdapter) dialAndConnect(ctx context.Context) (*websocket.Conn, *
 			},
 		},
 	}
-	if err := conn.WriteJSON(connectReq); err != nil {
+	if err := writeGatewayJSON(conn, connectReq, gatewayConnectWriteTimeout); err != nil {
 		_ = conn.Close()
 		return nil, nil, fmt.Errorf("openclaw gateway connect write: %w", err)
 	}
@@ -474,7 +479,7 @@ func (a *GatewayAdapter) streamAgent(
 			Thinking:       a.thinking,
 		},
 	}
-	if err := conn.WriteJSON(agentReq); err != nil {
+	if err := writeGatewayJSON(conn, agentReq, gatewayAgentWriteTimeout); err != nil {
 		return MessageResponse{}, false, fmt.Errorf("openclaw gateway agent write: %w", err)
 	}
 
@@ -485,6 +490,7 @@ func (a *GatewayAdapter) streamAgent(
 		keepConn           = true
 	)
 
+streamLoop:
 	for {
 		frame, err := ws.nextFrame(ctx)
 		if err != nil {
@@ -519,7 +525,7 @@ func (a *GatewayAdapter) streamAgent(
 			if err := json.Unmarshal(evt.Data, &data); err != nil {
 				continue
 			}
-			delta := data.Delta
+			delta := gatewayAssistantDelta(data)
 			if strings.TrimSpace(delta) == "" {
 				continue
 			}
@@ -545,21 +551,14 @@ func (a *GatewayAdapter) streamAgent(
 			}
 
 			// The agent method responds twice: an early ack (status=accepted) and a final response.
-			var statusProbe struct {
-				Status string `json:"status"`
-			}
-			_ = json.Unmarshal(frame.Payload, &statusProbe)
-			if strings.EqualFold(strings.TrimSpace(statusProbe.Status), "accepted") {
+			if gatewayIsAcceptedAgentResponse(frame.Payload) {
 				continue
 			}
 
-			finalTextFromReply = parseCLIReply(string(frame.Payload))
+			finalTextFromReply = gatewayFinalResponseText(frame.Payload)
+			break streamLoop
 		default:
 			// ignore
-		}
-
-		if finalTextFromReply != "" {
-			break
 		}
 	}
 
@@ -579,6 +578,84 @@ func (a *GatewayAdapter) streamAgent(
 		finalText = strings.TrimSpace(outSB.String())
 	}
 	return MessageResponse{Text: finalText}, keepConn, nil
+}
+
+func gatewayAssistantDelta(data agentAssistantData) string {
+	if strings.TrimSpace(data.Delta) != "" {
+		return data.Delta
+	}
+	if strings.TrimSpace(data.Text) != "" {
+		return data.Text
+	}
+	return ""
+}
+
+func gatewayIsAcceptedAgentResponse(payload json.RawMessage) bool {
+	raw := strings.TrimSpace(string(payload))
+	if raw == "" {
+		return false
+	}
+	obj, ok := parseJSONObject(raw)
+	if !ok {
+		return false
+	}
+
+	if strings.EqualFold(pickStringField(obj, "status"), "accepted") {
+		return true
+	}
+	if accepted, ok := obj["accepted"].(bool); ok && accepted {
+		return true
+	}
+
+	result, ok := obj["result"].(map[string]any)
+	if !ok {
+		return false
+	}
+	if strings.EqualFold(pickStringField(result, "status"), "accepted") {
+		return true
+	}
+	if accepted, ok := result["accepted"].(bool); ok && accepted {
+		return true
+	}
+	return false
+}
+
+func gatewayFinalResponseText(payload json.RawMessage) string {
+	raw := strings.TrimSpace(string(payload))
+	if raw == "" {
+		return ""
+	}
+
+	if parsed := strings.TrimSpace(parseCLIReply(raw)); parsed != "" {
+		return parsed
+	}
+
+	obj, ok := parseJSONObject(raw)
+	if !ok {
+		return ""
+	}
+	if text := pickStringField(obj, "text", "output", "message", "reply"); text != "" {
+		return text
+	}
+
+	if data, ok := obj["data"].(map[string]any); ok {
+		if text := pickStringField(data, "text", "output", "message", "reply"); text != "" {
+			return text
+		}
+	}
+
+	if result, ok := obj["result"].(map[string]any); ok {
+		if text := pickStringField(result, "text", "output", "message", "reply"); text != "" {
+			return text
+		}
+		if data, ok := result["data"].(map[string]any); ok {
+			if text := pickStringField(data, "text", "output", "message", "reply"); text != "" {
+				return text
+			}
+		}
+	}
+
+	return ""
 }
 
 type gatewayWS struct {
@@ -706,4 +783,15 @@ func (ws *gatewayWS) waitForResponseOK(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("%s", msg)
 	}
+}
+
+func writeGatewayJSON(conn *websocket.Conn, payload any, timeout time.Duration) error {
+	if conn == nil {
+		return errors.New("openclaw gateway connection is nil")
+	}
+	if timeout > 0 {
+		_ = conn.SetWriteDeadline(time.Now().Add(timeout))
+		defer conn.SetWriteDeadline(time.Time{})
+	}
+	return conn.WriteJSON(payload)
 }

@@ -16,14 +16,30 @@ type FallbackAdapter struct {
 	fallback Adapter
 }
 
-var fallbackFirstDeltaTimeout time.Duration
-var fallbackFirstDeltaRetries = 1
+var fallbackFirstDeltaTimeout = 450 * time.Millisecond
+var fallbackFirstDeltaRetries = 0
 
 func NewFallbackAdapter(primary Adapter, fallback Adapter) *FallbackAdapter {
 	return &FallbackAdapter{
 		primary:  primary,
 		fallback: fallback,
 	}
+}
+
+// Primary returns the preferred adapter used before fallback.
+func (a *FallbackAdapter) Primary() Adapter {
+	if a == nil {
+		return nil
+	}
+	return a.primary
+}
+
+// Secondary returns the fallback adapter.
+func (a *FallbackAdapter) Secondary() Adapter {
+	if a == nil {
+		return nil
+	}
+	return a.fallback
 }
 
 func (a *FallbackAdapter) StreamResponse(

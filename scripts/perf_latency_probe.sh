@@ -68,7 +68,8 @@ PY
       seen_samples=1
     fi
 
-    if ! JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$TARGET_ASSISTANT_WORKING_P95_MS" "$now" "$FAIL_ON_TARGETS" "$MIN_STAGE_SAMPLES" "$FAIL_EARLY" <<'PY'
+    py_rc=0
+    JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$TARGET_ASSISTANT_WORKING_P95_MS" "$now" "$FAIL_ON_TARGETS" "$MIN_STAGE_SAMPLES" "$FAIL_EARLY" <<'PY' || py_rc=$?
 import json
 import os
 import sys
@@ -148,12 +149,11 @@ print(
 if fail_on_targets and (fail_working or fail_text or fail_audio or fail_total):
     raise SystemExit(2 if fail_early else 11)
 PY
-    then
-      rc=$?
-      if [[ "${rc}" -eq 11 ]]; then
+    if [[ "${py_rc}" -ne 0 ]]; then
+      if [[ "${py_rc}" -eq 11 ]]; then
         had_target_breach=1
       else
-        exit "${rc}"
+        exit "${py_rc}"
       fi
     fi
   fi

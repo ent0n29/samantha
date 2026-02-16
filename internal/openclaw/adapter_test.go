@@ -151,6 +151,19 @@ func TestFallbackAdapterRetriesPrimaryBeforeFallback(t *testing.T) {
 	}
 }
 
+func TestFallbackAdapterAccessors(t *testing.T) {
+	primary := &countingAdapter{text: "primary"}
+	secondary := &countingAdapter{text: "fallback"}
+	a := NewFallbackAdapter(primary, secondary)
+
+	if got := a.Primary(); got != primary {
+		t.Fatalf("Primary() = %v, want %v", got, primary)
+	}
+	if got := a.Secondary(); got != secondary {
+		t.Fatalf("Secondary() = %v, want %v", got, secondary)
+	}
+}
+
 func TestParseCLIReplyFromRootPayloads(t *testing.T) {
 	raw := `{"payloads":[{"text":"hello"},{"text":"world"}],"meta":{"ok":true}}`
 	got := parseCLIReply(raw)

@@ -69,19 +69,26 @@ const (
 	memoryContextPrefetchFresh    = 2 * time.Second
 	brainPrefetchFresh            = 3 * time.Second
 	brainPrefetchWaitBudget       = 120 * time.Millisecond
-	brainPrefetchWaitMatureAfter  = 400 * time.Millisecond
-	brainPrefetchWaitBudgetMature = 900 * time.Millisecond
-	brainPrefetchMinCanonical     = 6
+	brainPrefetchWaitMatureAfter  = 320 * time.Millisecond
+	brainPrefetchWaitBudgetMature = 1400 * time.Millisecond
+	brainPrefetchMinCanonical     = 4
 	brainPrefetchMinWords         = 2
 	brainPrefetchStableRepeats    = 1
-	brainPrefetchDebounce         = 420 * time.Millisecond
+	brainPrefetchDebounce         = 260 * time.Millisecond
 	brainPrefetchEarlyMinWords    = 2
-	brainPrefetchEarlyAge         = 2 * time.Second
+	brainPrefetchEarlyAge         = 1200 * time.Millisecond
+	brainPrefetchMemoryCtxLimit   = 3
+	brainPrefetchCacheFresh       = 90 * time.Second
+	brainPrefetchCacheMaxEntries  = 24
+	brainFirstDeltaRetryTimeout   = 1400 * time.Millisecond
+	brainFirstDeltaRetryMax       = 1
 	wakeWordWindow                = 30 * time.Second
 	memorySaveTimeout             = 2 * time.Second
 	ttsFinalizeTimeout            = 10 * time.Second
 	thinkingDeltaPreviewMaxRunes  = 92
 )
+
+var errBrainFirstDeltaTimeout = errors.New("brain first delta timeout")
 
 func NewOrchestrator(
 	sessions *session.Manager,
@@ -289,6 +296,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		brainPrefetchResultVal *brainPrefetchResult
 		brainPrefetchReadyAt   time.Time
 		brainPrefetchStartedAt time.Time
+		brainPrefetchCache     = map[string]brainPrefetchResult{}
+		brainPrefetchCacheAt   = map[string]time.Time{}
+		brainPrefetchCacheLRU  []string
 
 		partialStableCanonical string
 		partialStableRepeats   int
@@ -364,6 +374,107 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		}
 	}
 
+	storeBrainPrefetchCache := func(ready *brainPrefetchResult) {
+		if ready == nil {
+			return
+		}
+		canonical := strings.TrimSpace(ready.canonicalInput)
+		if canonical == "" {
+			return
+		}
+
+		brainPrefetchMu.Lock()
+		defer brainPrefetchMu.Unlock()
+
+		clone := brainPrefetchResult{
+			canonicalInput: canonical,
+			deltas:         append([]string(nil), ready.deltas...),
+			finalText:      ready.finalText,
+		}
+		brainPrefetchCache[canonical] = clone
+		brainPrefetchCacheAt[canonical] = time.Now()
+
+		for i, key := range brainPrefetchCacheLRU {
+			if key == canonical {
+				brainPrefetchCacheLRU = append(brainPrefetchCacheLRU[:i], brainPrefetchCacheLRU[i+1:]...)
+				break
+			}
+		}
+		brainPrefetchCacheLRU = append(brainPrefetchCacheLRU, canonical)
+
+		for len(brainPrefetchCacheLRU) > brainPrefetchCacheMaxEntries {
+			evict := brainPrefetchCacheLRU[0]
+			brainPrefetchCacheLRU = brainPrefetchCacheLRU[1:]
+			delete(brainPrefetchCache, evict)
+			delete(brainPrefetchCacheAt, evict)
+		}
+		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_cache_store").Inc()
+	}
+
+	tryConsumeBrainPrefetchCache := func(canonical string) *brainPrefetchResult {
+		canonical = strings.TrimSpace(canonical)
+		if canonical == "" {
+			return nil
+		}
+
+		brainPrefetchMu.Lock()
+		defer brainPrefetchMu.Unlock()
+
+		bestKey := ""
+		bestScore := -1
+		for key, readyAt := range brainPrefetchCacheAt {
+			if readyAt.IsZero() || time.Since(readyAt) > brainPrefetchCacheFresh {
+				delete(brainPrefetchCache, key)
+				delete(brainPrefetchCacheAt, key)
+				for i, lruKey := range brainPrefetchCacheLRU {
+					if lruKey == key {
+						brainPrefetchCacheLRU = append(brainPrefetchCacheLRU[:i], brainPrefetchCacheLRU[i+1:]...)
+						break
+					}
+				}
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_cache_stale").Inc()
+				continue
+			}
+			if key == canonical {
+				bestKey = key
+				bestScore = 1 << 20
+				break
+			}
+			if !brainPrefetchCanonicalCompatible(key, canonical) {
+				continue
+			}
+			score := sharedWordPrefixCount(strings.Fields(key), strings.Fields(canonical))
+			if score > bestScore {
+				bestScore = score
+				bestKey = key
+			}
+		}
+		if bestKey == "" {
+			return nil
+		}
+		entry, ok := brainPrefetchCache[bestKey]
+		if !ok {
+			return nil
+		}
+		for i, key := range brainPrefetchCacheLRU {
+			if key == bestKey {
+				brainPrefetchCacheLRU = append(brainPrefetchCacheLRU[:i], brainPrefetchCacheLRU[i+1:]...)
+				break
+			}
+		}
+		brainPrefetchCacheLRU = append(brainPrefetchCacheLRU, bestKey)
+		if bestKey == canonical {
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_cache_hit").Inc()
+		} else {
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_cache_fuzzy_hit").Inc()
+		}
+		return &brainPrefetchResult{
+			canonicalInput: entry.canonicalInput,
+			deltas:         append([]string(nil), entry.deltas...),
+			finalText:      entry.finalText,
+		}
+	}
+
 	tryConsumeBrainPrefetch := func(canonical string) *brainPrefetchResult {
 		canonical = strings.TrimSpace(canonical)
 		if canonical == "" {
@@ -400,6 +511,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		if ready := getReady(); ready != nil {
 			return ready
 		}
+		if cached := tryConsumeBrainPrefetchCache(canonical); cached != nil {
+			return cached
+		}
 
 		var (
 			done      chan struct{}
@@ -431,7 +545,10 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				}
 			}
 		}
-		return getReady()
+		if ready := getReady(); ready != nil {
+			return ready
+		}
+		return tryConsumeBrainPrefetchCache(canonical)
 	}
 
 	startBrainPrefetch := func(rawText string, canonical string) {
@@ -483,12 +600,21 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		for _, r := range recent {
 			contextLines = append(contextLines, fmt.Sprintf("%s: %s", r.Role, r.Content))
 		}
+		if len(contextLines) > brainPrefetchMemoryCtxLimit {
+			contextLines = contextLines[len(contextLines)-brainPrefetchMemoryCtxLimit:]
+		}
 		personaID := o.profileForSession(*s).ID
+		prefetchAdapter := o.adapter
+		if fb, ok := o.adapter.(*openclaw.FallbackAdapter); ok {
+			if primary := fb.Primary(); primary != nil {
+				prefetchAdapter = primary
+			}
+		}
 
-		go func(ctx context.Context, gen int64, canonical, inputText string, done chan struct{}, memoryContext []string, personaID string) {
+		go func(ctx context.Context, gen int64, canonical, inputText string, done chan struct{}, memoryContext []string, personaID string, adapter openclaw.Adapter) {
 			defer close(done)
 			deltas := make([]string, 0, 24)
-			resp, err := o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
+			resp, err := adapter.StreamResponse(ctx, openclaw.MessageRequest{
 				UserID:        s.UserID,
 				SessionID:     s.ID,
 				TurnID:        "spec-" + uuid.NewString(),
@@ -508,23 +634,33 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				finalText:      strings.TrimSpace(resp.Text),
 			}
 
+			var cacheReady *brainPrefetchResult
 			brainPrefetchMu.Lock()
-			defer brainPrefetchMu.Unlock()
 			if brainPrefetchGen != gen || brainPrefetchCanonical != canonical {
+				brainPrefetchMu.Unlock()
 				return
 			}
 			brainPrefetchInFlight = false
 			brainPrefetchCancel = nil
 			if err != nil {
+				brainPrefetchMu.Unlock()
 				return
 			}
 			if len(ready.deltas) == 0 && ready.finalText == "" {
+				brainPrefetchMu.Unlock()
 				return
 			}
 			brainPrefetchResultVal = ready
 			brainPrefetchReadyAt = time.Now()
+			cacheReady = &brainPrefetchResult{
+				canonicalInput: ready.canonicalInput,
+				deltas:         append([]string(nil), ready.deltas...),
+				finalText:      ready.finalText,
+			}
 			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_ready").Inc()
-		}(specCtx, gen, canonical, rawText, doneCh, contextLines, personaID)
+			brainPrefetchMu.Unlock()
+			storeBrainPrefetchCache(cacheReady)
+		}(specCtx, gen, canonical, rawText, doneCh, contextLines, personaID, prefetchAdapter)
 	}
 
 	maybeStartBrainPrefetch := func(specText string, now time.Time, utteranceAge time.Duration) {
@@ -1165,6 +1301,12 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							Retryable: false,
 							Detail:    err.Error(),
 						})
+						o.send(outbound, protocol.AssistantTurnEnd{
+							Type:      protocol.TypeAssistantTurnEnd,
+							SessionID: s.ID,
+							TurnID:    turnID,
+							Reason:    "failed",
+						})
 					}
 				}(committedText, turnID, token, committedAt, prefetchedRecent, prefetchedReadyAt, prefetchedReady, prefetchedBrain)
 			case STTEventError:
@@ -1595,10 +1737,7 @@ func (o *Orchestrator) runAssistantTurn(
 		return nil
 	}
 
-	var (
-		res openclaw.MessageResponse
-		err error
-	)
+	var res openclaw.MessageResponse
 	if prefetchedBrain != nil {
 		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_hit").Inc()
 		for _, delta := range prefetchedBrain.deltas {
@@ -1610,16 +1749,36 @@ func (o *Orchestrator) runAssistantTurn(
 		res = openclaw.MessageResponse{Text: prefetchedBrain.finalText}
 	} else {
 		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_miss").Inc()
-		res, err = o.adapter.StreamResponse(ctx, openclaw.MessageRequest{
-			UserID:        s.UserID,
-			SessionID:     s.ID,
-			TurnID:        turnID,
-			InputText:     userText,
-			MemoryContext: contextLines,
-			PersonaID:     profile.ID,
-		}, handleDelta)
-		if err != nil {
-			return fmt.Errorf("stream response: %w", err)
+		retries := 0
+		var streamErr error
+		retryTimeout := brainFirstDeltaRetryTimeout
+		retryMax := brainFirstDeltaRetryMax
+		if _, ok := o.adapter.(*openclaw.FallbackAdapter); ok {
+			// FallbackAdapter already enforces first-delta timeout and failover; avoid
+			// double-canceling the request before fallback can complete.
+			retryTimeout = 0
+			retryMax = 0
+		}
+		res, retries, streamErr = streamResponseWithFirstDeltaRetry(
+			ctx,
+			o.adapter,
+			openclaw.MessageRequest{
+				UserID:        s.UserID,
+				SessionID:     s.ID,
+				TurnID:        turnID,
+				InputText:     userText,
+				MemoryContext: contextLines,
+				PersonaID:     profile.ID,
+			},
+			handleDelta,
+			retryTimeout,
+			retryMax,
+		)
+		for i := 0; i < retries; i++ {
+			o.metrics.SessionEvents.WithLabelValues("brain_first_delta_retry").Inc()
+		}
+		if streamErr != nil {
+			return fmt.Errorf("stream response: %w", streamErr)
 		}
 	}
 	if assistantOut == "" {
@@ -1773,17 +1932,6 @@ func (o *Orchestrator) send(outbound chan<- any, msg any) {
 		o.metrics.ObserveOutboundMessage(msgType, result)
 	}
 
-	if !o.strictOutbound {
-		select {
-		case outbound <- msg:
-			record("delivered")
-		default:
-			record("dropped")
-			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
-		}
-		return
-	}
-
 	sendWithTimeout := func(timeout time.Duration, timeoutEvent string) bool {
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
@@ -1803,6 +1951,17 @@ func (o *Orchestrator) send(outbound chan<- any, msg any) {
 	criticalTimeout := 600 * time.Millisecond
 	if critical {
 		if !sendWithTimeout(criticalTimeout, "outbound_timeout_critical") {
+			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
+		}
+		return
+	}
+
+	if !o.strictOutbound {
+		select {
+		case outbound <- msg:
+			record("delivered")
+		default:
+			record("dropped")
 			o.metrics.SessionEvents.WithLabelValues("outbound_drop").Inc()
 		}
 		return
@@ -2040,6 +2199,73 @@ func normalizeControlReason(raw string) string {
 		return ""
 	}
 	return out
+}
+
+func streamResponseWithFirstDeltaRetry(
+	ctx context.Context,
+	adapter openclaw.Adapter,
+	req openclaw.MessageRequest,
+	onDelta openclaw.DeltaHandler,
+	firstDeltaTimeout time.Duration,
+	maxRetries int,
+) (openclaw.MessageResponse, int, error) {
+	if adapter == nil {
+		return openclaw.MessageResponse{}, 0, fmt.Errorf("adapter is nil")
+	}
+	if firstDeltaTimeout <= 0 || maxRetries <= 0 {
+		resp, err := adapter.StreamResponse(ctx, req, onDelta)
+		return resp, 0, err
+	}
+
+	retries := 0
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		attemptReq := req
+		if attempt > 0 {
+			baseTurnID := strings.TrimSpace(req.TurnID)
+			if baseTurnID == "" {
+				attemptReq.TurnID = "retry-" + uuid.NewString()
+			} else {
+				attemptReq.TurnID = fmt.Sprintf("%s-retry-%d", baseTurnID, attempt)
+			}
+		}
+
+		attemptCtx, cancelAttempt := context.WithCancel(ctx)
+		var (
+			firstDeltaSeen atomic.Bool
+			timedOut       atomic.Bool
+		)
+		timer := time.AfterFunc(firstDeltaTimeout, func() {
+			if !firstDeltaSeen.Load() {
+				timedOut.Store(true)
+				cancelAttempt()
+			}
+		})
+
+		resp, err := adapter.StreamResponse(attemptCtx, attemptReq, func(delta string) error {
+			if strings.TrimSpace(delta) != "" {
+				firstDeltaSeen.Store(true)
+			}
+			if onDelta == nil {
+				return nil
+			}
+			return onDelta(delta)
+		})
+		timer.Stop()
+		cancelAttempt()
+
+		if err == nil {
+			return resp, retries, nil
+		}
+		if timedOut.Load() && !firstDeltaSeen.Load() && retries >= maxRetries {
+			return openclaw.MessageResponse{}, retries, fmt.Errorf("%w after %d attempt(s) (%s)", errBrainFirstDeltaTimeout, retries+1, firstDeltaTimeout)
+		}
+		if !timedOut.Load() || firstDeltaSeen.Load() {
+			return openclaw.MessageResponse{}, retries, err
+		}
+		retries++
+	}
+
+	return openclaw.MessageResponse{}, retries, context.DeadlineExceeded
 }
 
 func ttsSettingsForProfile(p PersonaProfile) TTSSettings {
