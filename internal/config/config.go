@@ -85,16 +85,17 @@ func Load() (Config, error) {
 		// Prefer explicit commit driven by our client-side VAD and controls.
 		ElevenLabsSTTCommitStrategy: envOrDefault("ELEVENLABS_STT_COMMIT_STRATEGY", "manual"),
 		LocalWhisperCLI:             envOrDefault("LOCAL_WHISPER_CLI", "whisper-cli"),
-		// Default to a very fast English Whisper model for local realtime use.
+		// Default to a fast English Whisper model for local realtime use.
 		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-tiny.en.bin"),
 		LocalWhisperLanguage:  envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),
 		// 0 means "auto" (picked based on CPU count).
-		LocalWhisperThreads:       0,
-		LocalWhisperBeamSize:      1,
-		LocalWhisperBestOf:        1,
+		LocalWhisperThreads: 0,
+		// Slightly favor transcript quality without changing the model size.
+		LocalWhisperBeamSize:      2,
+		LocalWhisperBestOf:        2,
 		LocalKokoroPython:         envOrDefault("LOCAL_KOKORO_PYTHON", ""),
 		LocalKokoroWorkerScript:   envOrDefault("LOCAL_KOKORO_WORKER_SCRIPT", "scripts/kokoro_worker.py"),
-		LocalKokoroVoice:          envOrDefault("LOCAL_KOKORO_VOICE", "af_heart"),
+		LocalKokoroVoice:          envOrDefault("LOCAL_KOKORO_VOICE", "af_sarah"),
 		LocalKokoroLangCode:       envOrDefault("LOCAL_KOKORO_LANG_CODE", "a"),
 		OpenClawAdapterMode:       envOrDefault("OPENCLAW_ADAPTER_MODE", "auto"),
 		OpenClawGatewayURL:        envOrDefault("OPENCLAW_GATEWAY_URL", "ws://127.0.0.1:18789"),
@@ -120,7 +121,7 @@ func Load() (Config, error) {
 		UIAudioWorklet:            true,
 		UITaskDeskDefault:         false,
 		UISilenceBreakerMode:      envOrDefault("APP_UI_SILENCE_BREAKER_MODE", "visual"),
-		UIVADProfile:              envOrDefault("APP_UI_VAD_PROFILE", "snappy"),
+		UIVADProfile:              envOrDefault("APP_UI_VAD_PROFILE", "default"),
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
@@ -253,10 +254,10 @@ func Load() (Config, error) {
 	}
 	cfg.UIVADProfile = strings.ToLower(trimSpace(cfg.UIVADProfile))
 	if cfg.UIVADProfile == "" {
-		cfg.UIVADProfile = "snappy"
+		cfg.UIVADProfile = "default"
 	}
-	if cfg.UIVADProfile != "snappy" && cfg.UIVADProfile != "default" {
-		return Config{}, fmt.Errorf("APP_UI_VAD_PROFILE must be one of: snappy|default")
+	if cfg.UIVADProfile != "snappy" && cfg.UIVADProfile != "default" && cfg.UIVADProfile != "patient" {
+		return Config{}, fmt.Errorf("APP_UI_VAD_PROFILE must be one of: default|patient|snappy")
 	}
 	if cfg.MemoryEmbeddingDim <= 0 {
 		return Config{}, fmt.Errorf("MEMORY_EMBEDDING_DIM must be positive")

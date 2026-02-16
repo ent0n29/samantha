@@ -5,42 +5,48 @@ import (
 	"testing"
 )
 
-func TestSplitTTSReadySegmentsKeepsShortUnpunctuatedTail(t *testing.T) {
-	ready, rest := splitTTSReadySegments("hello world", 12, 180)
+func TestSplitTTSReadySegmentsPrefersSentenceBoundary(t *testing.T) {
+	text := "I can help you with that and keep this natural while we think through it together. Then we can continue."
+	ready, rest := splitTTSReadySegments(text, 42, 220)
+	if len(ready) == 0 {
+		t.Fatalf("expected at least one ready segment")
+	}
+	if !strings.HasSuffix(ready[0], ".") {
+		t.Fatalf("first segment = %q, want sentence boundary", ready[0])
+	}
+	if len(ready[0]) < 42 {
+		t.Fatalf("first segment too short: len=%d", len(ready[0]))
+	}
+	_ = rest
+}
+
+func TestSplitTTSReadySegmentsAvoidsPrematureFragment(t *testing.T) {
+	// Length is >= minChars, but still below the fallback threshold (min + 40),
+	// so we should keep buffering instead of emitting a tiny robotic chunk.
+	text := strings.Repeat("word ", 14)
+	ready, rest := splitTTSReadySegments(text, 42, 220)
 	if len(ready) != 0 {
-		t.Fatalf("ready len = %d, want 0", len(ready))
+		t.Fatalf("ready segments = %d, want 0 to avoid robotic fragmentation", len(ready))
 	}
-	if rest != "hello world" {
-		t.Fatalf("rest = %q, want %q", rest, "hello world")
-	}
-}
-
-func TestSplitTTSReadySegmentsUsesSentenceBoundary(t *testing.T) {
-	ready, rest := splitTTSReadySegments("Hello there. Next sentence", 12, 180)
-	if len(ready) == 0 {
-		t.Fatalf("ready len = 0, want >= 1")
-	}
-	if ready[0] != "Hello there." {
-		t.Fatalf("first segment = %q, want %q", ready[0], "Hello there.")
-	}
-	if rest != "Next sentence" {
-		t.Fatalf("rest = %q, want %q", rest, "Next sentence")
+	if strings.TrimSpace(rest) != strings.TrimSpace(text) {
+		t.Fatalf("unexpected remainder: got %q want %q", strings.TrimSpace(rest), strings.TrimSpace(text))
 	}
 }
 
-func TestSplitTTSReadySegmentsFlushesWithoutPunctuation(t *testing.T) {
-	input := "hello world this is a stream with no punctuation yet and it should start speaking soon"
-	ready, rest := splitTTSReadySegments(input, 12, 180)
+func TestSplitTTSReadySegmentsLongTextRespectsBounds(t *testing.T) {
+	text := strings.Repeat("steady speech flow without punctuation ", 12)
+	minChars := 42
+	maxChars := 120
+	ready, _ := splitTTSReadySegments(text, minChars, maxChars)
 	if len(ready) == 0 {
-		t.Fatalf("ready len = 0, want >= 1")
+		t.Fatalf("expected at least one segment")
 	}
-	if len(ready[0]) < 12 {
-		t.Fatalf("first segment len = %d, want >= 12", len(ready[0]))
-	}
-	if len(ready[0]) > 40 {
-		t.Fatalf("first segment len = %d, want <= 40", len(ready[0]))
-	}
-	if strings.TrimSpace(rest) == "" {
-		t.Fatalf("rest unexpectedly empty; want tail for continued streaming")
+	for i, seg := range ready {
+		if len(seg) < minChars {
+			t.Fatalf("segment %d too short: len=%d min=%d", i, len(seg), minChars)
+		}
+		if len(seg) > maxChars {
+			t.Fatalf("segment %d too long: len=%d max=%d", i, len(seg), maxChars)
+		}
 	}
 }

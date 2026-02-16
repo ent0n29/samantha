@@ -26,18 +26,22 @@ const VAD_RELATIVE_THRESHOLD = 2.4;
 const VAD_MAX_ZCR = 0.25; // zero-crossing rate (0..1). Higher tends to be noise/clicks.
 const VAD_MAX_CREST = 25; // peak/rms. Very high tends to be impulse noise (keyboard clicks).
 const VAD_ATTACK_FRAMES = 3; // ~190-260ms depending capture frame size; prevents click triggers.
-const VAD_RELEASE_FRAMES = 6; // ~450-520ms hangover before auto-commit.
-const VAD_RELEASE_FRAMES_SHORT = 4; // short utterances can commit faster without sounding clipped.
 const VAD_SHORT_UTTERANCE_MS = 1500;
-const VAD_AUTO_COMMIT_SILENCE_MS = 390;
-const VAD_AUTO_COMMIT_SILENCE_SHORT_MS = 280;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 700;
-const VAD_PROFILE_DEFAULT = "snappy";
+const VAD_AUTO_COMMIT_MIN_UTTERANCE_MS = 650;
+const VAD_AUTO_COMMIT_GRACE_MS = 220;
+const VAD_PROFILE_DEFAULT = "default";
 const VAD_TUNING_DEFAULT = {
-  releaseFrames: VAD_RELEASE_FRAMES,
-  releaseFramesShort: VAD_RELEASE_FRAMES_SHORT,
-  autoCommitSilenceMs: VAD_AUTO_COMMIT_SILENCE_MS,
-  autoCommitSilenceShortMs: VAD_AUTO_COMMIT_SILENCE_SHORT_MS,
+  releaseFrames: 9,
+  releaseFramesShort: 7,
+  autoCommitSilenceMs: 620,
+  autoCommitSilenceShortMs: 500,
+};
+const VAD_TUNING_PATIENT = {
+  releaseFrames: 11,
+  releaseFramesShort: 9,
+  autoCommitSilenceMs: 860,
+  autoCommitSilenceShortMs: 700,
 };
 const VAD_TUNING_SNAPPY = {
   releaseFrames: 5,
@@ -45,6 +49,7 @@ const VAD_TUNING_SNAPPY = {
   autoCommitSilenceMs: 280,
   autoCommitSilenceShortMs: 200,
 };
+const AUDIO_SEGMENT_OVERLAP_SEC = 0.022;
 const PLAYBACK_PREWARM_COOLDOWN_MS = 45_000;
 const PLAYBACK_PREWARM_DURATION_SEC = 0.03;
 const UI_SILENCE_BREAKER_MODE_DEFAULT = "visual";
@@ -134,7 +139,7 @@ const state = {
   vadSpeechStartMs: 0,
   vadPreroll: [],
   vadPrerollBytes: 0,
-  vadTuning: VAD_TUNING_SNAPPY,
+  vadTuning: VAD_TUNING_DEFAULT,
 
   vizCtx: null,
   vizCSSW: 0,
@@ -300,7 +305,7 @@ function normalizeSilenceBreakerDelayMs(raw) {
 
 function normalizeVADProfile(raw) {
   const profile = String(raw || "").trim().toLowerCase();
-  if (profile === "default" || profile === "snappy") {
+  if (profile === "default" || profile === "patient" || profile === "snappy") {
     return profile;
   }
   return VAD_PROFILE_DEFAULT;
@@ -309,6 +314,10 @@ function normalizeVADProfile(raw) {
 function applyVADTuning() {
   const profile = normalizeVADProfile(state.uiSettings.vadProfile);
   state.uiSettings.vadProfile = profile;
+  if (profile === "patient") {
+    state.vadTuning = VAD_TUNING_PATIENT;
+    return;
+  }
   state.vadTuning = profile === "default" ? VAD_TUNING_DEFAULT : VAD_TUNING_SNAPPY;
 }
 
@@ -1120,9 +1129,14 @@ function maybeAutoCommit() {
   }
   const now = Date.now();
   const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
+  if (utteranceMs > 0 && utteranceMs < VAD_AUTO_COMMIT_MIN_UTTERANCE_MS) {
+    return;
+  }
   const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
-  const silenceTargetMs =
+  let silenceTargetMs =
     utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.autoCommitSilenceShortMs : tuning.autoCommitSilenceMs;
+  // Keep auto-commit as a conservative fallback; frame-based release is the primary trigger.
+  silenceTargetMs += VAD_AUTO_COMMIT_GRACE_MS;
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
   if (silenceMs < silenceTargetMs) {
@@ -2283,18 +2297,24 @@ async function scheduleWavSegment(bytes, token) {
 
   const t0 = ctx.currentTime;
   const baseStart = t0 + 0.03;
+  let overlap = 0;
+  const canOverlap = Number.isFinite(state.playbackNextTime) && state.playbackNextTime > baseStart;
+  if (canOverlap) {
+    overlap = Math.min(AUDIO_SEGMENT_OVERLAP_SEC, buffer.duration * 0.18);
+  }
   if (!state.playbackNextTime || state.playbackNextTime < baseStart - 0.1) {
     state.playbackNextTime = baseStart;
   }
-  const startAt = Math.max(baseStart, state.playbackNextTime);
+  const startAt = Math.max(baseStart, state.playbackNextTime - overlap);
   const endAt = startAt + buffer.duration;
 
   const src = ctx.createBufferSource();
   src.buffer = buffer;
 
   const segGain = ctx.createGain();
-  const fade = Math.min(0.012, buffer.duration * 0.25);
-  const fadeInEnd = startAt + fade;
+  const fade = Math.min(0.018, buffer.duration * 0.25);
+  const fadeIn = Math.max(0.004, Math.min(fade, overlap || fade));
+  const fadeInEnd = Math.min(endAt, startAt + fadeIn);
   const fadeOutStart = Math.max(fadeInEnd, endAt - fade);
   segGain.gain.setValueAtTime(0, startAt);
   segGain.gain.linearRampToValueAtTime(1, fadeInEnd);
@@ -2403,18 +2423,24 @@ async function schedulePCM16Segment(bytes, sampleRate, token) {
 
   const t0 = ctx.currentTime;
   const baseStart = t0 + 0.03;
+  let overlap = 0;
+  const canOverlap = Number.isFinite(state.playbackNextTime) && state.playbackNextTime > baseStart;
+  if (canOverlap) {
+    overlap = Math.min(AUDIO_SEGMENT_OVERLAP_SEC, buffer.duration * 0.18);
+  }
   if (!state.playbackNextTime || state.playbackNextTime < baseStart - 0.1) {
     state.playbackNextTime = baseStart;
   }
-  const startAt = Math.max(baseStart, state.playbackNextTime);
+  const startAt = Math.max(baseStart, state.playbackNextTime - overlap);
   const endAt = startAt + buffer.duration;
 
   const src = ctx.createBufferSource();
   src.buffer = buffer;
 
   const segGain = ctx.createGain();
-  const fade = Math.min(0.012, buffer.duration * 0.25);
-  const fadeInEnd = startAt + fade;
+  const fade = Math.min(0.018, buffer.duration * 0.25);
+  const fadeIn = Math.max(0.004, Math.min(fade, overlap || fade));
+  const fadeInEnd = Math.min(endAt, startAt + fadeIn);
   const fadeOutStart = Math.max(fadeInEnd, endAt - fade);
   segGain.gain.setValueAtTime(0, startAt);
   segGain.gain.linearRampToValueAtTime(1, fadeInEnd);

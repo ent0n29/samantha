@@ -113,6 +113,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `APP_ASSISTANT_WORKING_DELAY` (backend delay before emitting `assistant_working`; `0` disables)
 - `APP_UI_SILENCE_BREAKER_MODE=off|visual|speech` (dead-air behavior while waiting)
 - `APP_UI_SILENCE_BREAKER_DELAY` (delay before silence-breaker triggers after `assistant_working`)
+- `APP_UI_VAD_PROFILE=default|patient|snappy` (`patient` waits longest; `snappy` responds sooner)
 - `APP_UI_TASK_DESK_DEFAULT` (keep Task Desk hidden by default in core `/ui/`)
 - `APP_TASK_RUNTIME_ENABLED`, `APP_TASK_TIMEOUT`, `APP_TASK_IDEMPOTENCY_WINDOW` (voice-to-task runtime)
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
@@ -131,6 +132,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 
 - Local (offline, default): whisper.cpp STT + Kokoro TTS (`VOICE_PROVIDER=local`)
   - First run: `make setup-local-voice`
+  - If transcripts are still too rough, increase `LOCAL_WHISPER_BEAM_SIZE`/`LOCAL_WHISPER_BEST_OF` or switch to a larger local model.
 - ElevenLabs (optional): set `VOICE_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY`
   - If you want automatic fallback to local when ElevenLabs fails, use `VOICE_PROVIDER=auto`.
   - For lowest-latency playback, keep `ELEVENLABS_TTS_OUTPUT_FORMAT=pcm_16000` (default).

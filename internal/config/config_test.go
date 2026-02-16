@@ -45,8 +45,8 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.UITaskDeskDefault {
 		t.Fatalf("UITaskDeskDefault = true, want false")
 	}
-	if cfg.UIVADProfile != "snappy" {
-		t.Fatalf("UIVADProfile = %q, want %q", cfg.UIVADProfile, "snappy")
+	if cfg.UIVADProfile != "default" {
+		t.Fatalf("UIVADProfile = %q, want %q", cfg.UIVADProfile, "default")
 	}
 }
 
@@ -213,6 +213,20 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	}
 	if !cfg.OpenClawHTTPStreamStrict {
 		t.Fatalf("OpenClawHTTPStreamStrict = false, want true")
+	}
+}
+
+func TestLoadAcceptsPatientVADProfile(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9595")
+	t.Setenv("APP_UI_VAD_PROFILE", "patient")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.UIVADProfile != "patient" {
+		t.Fatalf("UIVADProfile = %q, want %q", cfg.UIVADProfile, "patient")
 	}
 }
 
