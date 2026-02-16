@@ -8,10 +8,10 @@ type prosodyPlanner struct {
 }
 
 const (
-	prosodyFirstChunkMin = 24
-	prosodyNextChunkMin  = 54
-	prosodyCommaChunkMin = 60
-	prosodyCutWindow     = 44
+	prosodyFirstChunkMin = 30
+	prosodyNextChunkMin  = 72
+	prosodyCommaChunkMin = 78
+	prosodyCutWindow     = 56
 )
 
 func newProsodyPlanner() *prosodyPlanner {
