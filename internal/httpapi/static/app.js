@@ -39,7 +39,7 @@ const VAD_SHORT_COMMAND_MS = 900;
 const VAD_CONTINUATION_EXTRA_RELEASE_FRAMES = 2;
 const VAD_LONG_UTTERANCE_EXTRA_RELEASE_FRAMES = 2;
 const VAD_SHORT_COMMAND_RELEASE_DELTA = -1;
-const VAD_CONTINUATION_EXTRA_GRACE_MS = 120;
+const VAD_CONTINUATION_EXTRA_GRACE_MS = 180;
 const VAD_SEMANTIC_HINT_STALE_MS = 2400;
 const VAD_SEMANTIC_HOLD_MS_MAX = 900;
 const VAD_SEMANTIC_HOLD_MS_MIN = 0;
@@ -1275,6 +1275,9 @@ function hasContinuationCue(partialText) {
     return true;
   }
   if (/\b(and|but|because|so|then|which|that|if|when|while)\b\s*$/.test(t)) {
+    return true;
+  }
+  if (/\b(a|an|the|my|your|our|this|that|these|those|to|for|with|from|about|into|onto|over|under|between|through|during|without|within|across|around|before|after)\b\s*$/.test(t)) {
     return true;
   }
   if (/\b(i mean|for example|for instance|in order to)\b\s*$/.test(t)) {

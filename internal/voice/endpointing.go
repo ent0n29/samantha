@@ -33,11 +33,12 @@ const (
 )
 
 var (
-	semanticContinuationTailRe = regexp.MustCompile(`(?i)\b(and|but|because|so|then|which|that|if|when|while|as|to|for)\s*$`)
-	semanticContinuationHeadRe = regexp.MustCompile(`(?i)^(and|but|because|so|then)\b`)
-	semanticContinuationPhrase = regexp.MustCompile(`(?i)\b(i mean|for example|for instance|in order to)\s*$`)
-	semanticTerminalTailRe     = regexp.MustCompile(`(?i)([.!?]["']?\s*$|\b(done|thanks|thank you|that's all|thats all)\s*$)`)
-	semanticOpenTailRe         = regexp.MustCompile(`[,;:\-…]\s*$`)
+	semanticContinuationTailRe         = regexp.MustCompile(`(?i)\b(and|but|because|so|then|which|that|if|when|while|as|to|for)\s*$`)
+	semanticContinuationOpenWordTailRe = regexp.MustCompile(`(?i)\b(a|an|the|my|your|our|this|that|these|those|to|for|with|from|about|into|onto|over|under|between|through|during|without|within|across|around|before|after)\s*$`)
+	semanticContinuationHeadRe         = regexp.MustCompile(`(?i)^(and|but|because|so|then)\b`)
+	semanticContinuationPhrase         = regexp.MustCompile(`(?i)\b(i mean|for example|for instance|in order to)\s*$`)
+	semanticTerminalTailRe             = regexp.MustCompile(`(?i)([.!?]["']?\s*$|\b(done|thanks|thank you|that's all|thats all)\s*$)`)
+	semanticOpenTailRe                 = regexp.MustCompile(`[,;:\-…]\s*$`)
 )
 
 func buildSemanticEndpointHint(partial string, confidence float64, utteranceAge time.Duration) (semanticEndpointHint, bool) {
@@ -148,6 +149,9 @@ func hasSemanticContinuationCue(normalized string) bool {
 		return true
 	}
 	if semanticContinuationTailRe.MatchString(normalized) {
+		return true
+	}
+	if semanticContinuationOpenWordTailRe.MatchString(normalized) {
 		return true
 	}
 	if semanticContinuationPhrase.MatchString(normalized) {
