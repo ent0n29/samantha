@@ -45,6 +45,9 @@ const VAD_SEMANTIC_HOLD_MS_MAX = 900;
 const VAD_SEMANTIC_HOLD_MS_MIN = 0;
 const VAD_SEMANTIC_RELEASE_FRAME_MS = 140;
 const VAD_SEMANTIC_COMMIT_RELEASE_DELTA = -2;
+const VAD_PARTIAL_FRESH_HOLD_MS = 260;
+const VAD_PARTIAL_PROGRESS_HOLD_MS = 240;
+const VAD_PARTIAL_ENDPOINT_FRAME_MS = 110;
 const VAD_PROFILE_DEFAULT = "default";
 const VAD_TUNING_DEFAULT = {
   releaseFrames: 9,
@@ -180,6 +183,10 @@ const state = {
   vadPrerollBytes: 0,
   vadTuning: VAD_TUNING_DEFAULT,
   lastPartialText: "",
+  lastPartialCanonical: "",
+  lastPartialWordCount: 0,
+  lastPartialAtMs: 0,
+  lastPartialProgressAtMs: 0,
   utteranceHadContinuationHold: false,
   semanticHint: {
     reason: "",
@@ -1317,6 +1324,89 @@ function resetSemanticHint() {
   state.semanticHint.atMs = 0;
 }
 
+function canonicalizePartialText(raw) {
+  const input = String(raw || "").toLowerCase();
+  if (!input) {
+    return "";
+  }
+  return input
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function wordsInCanonical(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return 0;
+  }
+  return normalized.split(" ").length;
+}
+
+function resetPartialTracking() {
+  state.lastPartialText = "";
+  state.lastPartialCanonical = "";
+  state.lastPartialWordCount = 0;
+  state.lastPartialAtMs = 0;
+  state.lastPartialProgressAtMs = 0;
+}
+
+function trackPartialProgress(partialText, now) {
+  state.lastPartialText = partialText;
+  state.lastPartialAtMs = now;
+  const canonical = canonicalizePartialText(partialText);
+  if (!canonical) {
+    state.lastPartialCanonical = "";
+    state.lastPartialWordCount = 0;
+    return;
+  }
+  const words = wordsInCanonical(canonical);
+  const prevCanonical = state.lastPartialCanonical;
+  const prevWords = state.lastPartialWordCount || 0;
+  if (!prevCanonical) {
+    state.lastPartialProgressAtMs = now;
+  } else if (canonical !== prevCanonical) {
+    if (canonical.startsWith(prevCanonical)) {
+      if (words > prevWords) {
+        state.lastPartialProgressAtMs = now;
+      }
+    } else if (prevCanonical.startsWith(canonical)) {
+      if (prevWords-words <= 1) {
+        state.lastPartialProgressAtMs = now;
+      }
+    } else {
+      state.lastPartialProgressAtMs = now;
+    }
+  }
+  state.lastPartialCanonical = canonical;
+  state.lastPartialWordCount = words;
+}
+
+function partialStabilityHoldMs(now) {
+  let hold = 0;
+  if (state.lastPartialAtMs > 0) {
+    const age = now - state.lastPartialAtMs;
+    if (age < VAD_PARTIAL_FRESH_HOLD_MS) {
+      hold = Math.max(hold, VAD_PARTIAL_FRESH_HOLD_MS - age);
+    }
+  }
+  if (state.lastPartialProgressAtMs > 0) {
+    const progressAge = now - state.lastPartialProgressAtMs;
+    if (progressAge < VAD_PARTIAL_PROGRESS_HOLD_MS) {
+      hold = Math.max(hold, VAD_PARTIAL_PROGRESS_HOLD_MS - progressAge);
+    }
+  }
+  return hold;
+}
+
+function partialEndpointExtraReleaseFrames(now) {
+  const holdMs = partialStabilityHoldMs(now);
+  if (holdMs <= 0) {
+    return 0;
+  }
+  return Math.max(0, Math.ceil(holdMs / VAD_PARTIAL_ENDPOINT_FRAME_MS));
+}
+
 function adaptiveReleaseFrames(baseRelease, utteranceMs, partialText) {
   let release = Number(baseRelease) || 1;
   let continuationHold = false;
@@ -1379,6 +1469,7 @@ function maybeAutoCommit() {
       silenceTargetMs = Math.min(silenceTargetMs, 260);
     }
   }
+  silenceTargetMs += partialStabilityHoldMs(now);
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
   if (silenceMs < silenceTargetMs) {
@@ -2343,7 +2434,7 @@ function resetVAD() {
   state.vadSilenceFrames = 0;
   state.vadStreaming = false;
   state.vadSpeechStartMs = 0;
-  state.lastPartialText = "";
+  resetPartialTracking();
   state.utteranceHadContinuationHold = false;
   resetSemanticHint();
   clearVADPreroll();
@@ -2894,8 +2985,9 @@ function processMicFrame(input, inputSampleRate) {
   const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
   const baseRelease = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.releaseFramesShort : tuning.releaseFrames;
   const endpoint = adaptiveReleaseFrames(baseRelease, utteranceMs, state.lastPartialText);
+  const extraRelease = partialEndpointExtraReleaseFrames(now);
   state.utteranceHadContinuationHold = endpoint.continuationHold;
-  if (!speechLike && state.vadSilenceFrames >= endpoint.release) {
+  if (!speechLike && state.vadSilenceFrames >= endpoint.release + extraRelease) {
     flushQueuedMicPCM(now, true);
     state.lastAutoCommitAtMs = now;
     state.sawSpeech = false;
@@ -3098,8 +3190,11 @@ function handleServerMessage(raw) {
       if (!isAwake()) {
         break;
       }
-      state.lastPartialText = String(msg.text || "");
-      setPresence("listening", "I’m listening.", msg.text || "");
+      {
+        const partialText = String(msg.text || "");
+        trackPartialProgress(partialText, Date.now());
+        setPresence("listening", "I’m listening.", partialText);
+      }
       break;
     case "stt_committed":
       if (!isAwake()) {
@@ -3119,7 +3214,7 @@ function handleServerMessage(raw) {
       }
       state.lastCommitAtMs = Date.now();
       state.fillerCountForTurn = 0;
-      state.lastPartialText = "";
+      resetPartialTracking();
       resetSemanticHint();
       state.awaitingAssistantResponse = true;
       clearSilenceBreakerTimer();
