@@ -70,6 +70,13 @@ func TestShouldStartBrainPrefetchEarly(t *testing.T) {
 			want:        true,
 		},
 		{
+			name:        "four-word instruction starts early",
+			partialText: "refactor this module today",
+			canonical:   "refactor this module today",
+			utteranceMs: 900,
+			want:        true,
+		},
+		{
 			name:        "age-based starts early",
 			partialText: "we should compare both approaches",
 			canonical:   "we should compare both approaches",

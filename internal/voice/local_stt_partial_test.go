@@ -207,6 +207,12 @@ func TestShouldUseLocalPartialAsCommit(t *testing.T) {
 	if shouldUseLocalPartialAsCommit("we can ship this today", now.Add(-3*time.Second), bytesForAudioDuration(16000, time.Second), 16000) {
 		t.Fatalf("expected stale partial to be ignored")
 	}
+	if !shouldUseLocalPartialAsCommit("do it.", now, bytesForAudioDuration(16000, 360*time.Millisecond), 16000) {
+		t.Fatalf("expected short terminal partial to be accepted")
+	}
+	if shouldUseLocalPartialAsCommit("do it.", now, bytesForAudioDuration(16000, 220*time.Millisecond), 16000) {
+		t.Fatalf("expected too-short audio window to be ignored even for terminal partial")
+	}
 }
 
 func newTestLocalSTTSession(t *testing.T, transcriber whisperTranscriber) *localSTTSession {

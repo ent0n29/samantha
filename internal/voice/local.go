@@ -349,8 +349,14 @@ type localSTTPartialJob struct {
 	sampleRate int
 }
 
-const localSTTPartialMinDeltaRunes = 3
-const localSTTCommitFromPartialFreshWindow = 1200 * time.Millisecond
+const (
+	localSTTPartialMinDeltaRunes           = 3
+	localSTTCommitFromPartialFreshWindow   = 1200 * time.Millisecond
+	localSTTCommitFromPartialMinAudio      = 500 * time.Millisecond
+	localSTTCommitFromTerminalMinAudio     = 320 * time.Millisecond
+	localSTTCommitFromTerminalMinWordCount = 2
+	localSTTCommitFromDefaultMinWordCount  = 3
+)
 
 func localSTTPartialConfigForProfile(profile string) localSTTPartialConfig {
 	cfg := localSTTPartialConfig{
@@ -652,12 +658,17 @@ func shouldUseLocalPartialAsCommit(partialText string, partialAt time.Time, audi
 	if sampleRate <= 0 {
 		sampleRate = 16000
 	}
-	minAudioBytes := bytesForAudioDuration(sampleRate, 500*time.Millisecond)
-	if audioBytes < minAudioBytes {
-		return false
-	}
 	normalized := normalizeSemanticEndpointText(partialText)
 	if normalized == "" {
+		return false
+	}
+	terminal := hasSemanticTerminalCue(normalized)
+	minAudio := localSTTCommitFromPartialMinAudio
+	if terminal {
+		minAudio = localSTTCommitFromTerminalMinAudio
+	}
+	minAudioBytes := bytesForAudioDuration(sampleRate, minAudio)
+	if audioBytes < minAudioBytes {
 		return false
 	}
 	leadCanon := canonicalizeForLeadFiller(partialText)
@@ -665,12 +676,14 @@ func shouldUseLocalPartialAsCommit(partialText string, partialAt time.Time, audi
 		return false
 	}
 	wordCount := 1 + strings.Count(normalized, " ")
-	if wordCount < 3 {
-		return false
-	}
 	// Avoid committing clearly unfinished clauses from a partial transcript.
 	if hasSemanticContinuationCue(normalized) && !hasSemanticTerminalCue(normalized) {
 		return false
+	}
+	if wordCount < localSTTCommitFromDefaultMinWordCount {
+		if !(terminal && wordCount >= localSTTCommitFromTerminalMinWordCount) {
+			return false
+		}
 	}
 	return true
 }

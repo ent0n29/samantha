@@ -68,12 +68,12 @@ const (
 	memoryContextSoftWait        = 120 * time.Millisecond
 	memoryContextPrefetchFresh   = 2 * time.Second
 	brainPrefetchFresh           = 3 * time.Second
-	brainPrefetchWaitBudget      = 80 * time.Millisecond
+	brainPrefetchWaitBudget      = 120 * time.Millisecond
 	brainPrefetchMinCanonical    = 18
 	brainPrefetchMinWords        = 3
 	brainPrefetchStableRepeats   = 2
-	brainPrefetchDebounce        = 550 * time.Millisecond
-	brainPrefetchEarlyMinWords   = 6
+	brainPrefetchDebounce        = 420 * time.Millisecond
+	brainPrefetchEarlyMinWords   = 4
 	brainPrefetchEarlyAge        = 2 * time.Second
 	wakeWordWindow               = 30 * time.Second
 	memorySaveTimeout            = 2 * time.Second
