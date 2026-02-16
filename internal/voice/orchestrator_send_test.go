@@ -42,4 +42,3 @@ func TestSendDeliversCriticalWhenOutboundQueueTemporarilyFull(t *testing.T) {
 		t.Fatalf("timed out waiting for critical outbound message")
 	}
 }
-
