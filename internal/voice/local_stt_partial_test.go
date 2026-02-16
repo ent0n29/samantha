@@ -13,6 +13,7 @@ type scriptedWhisperTranscriber struct {
 	mu        sync.Mutex
 	responses []string
 	delay     time.Duration
+	calls     int
 }
 
 func (s *scriptedWhisperTranscriber) Transcribe(ctx context.Context, _ []byte, _ int) (string, error) {
@@ -27,6 +28,7 @@ func (s *scriptedWhisperTranscriber) Transcribe(ctx context.Context, _ []byte, _
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.calls++
 	if len(s.responses) == 0 {
 		return "", nil
 	}
@@ -35,6 +37,12 @@ func (s *scriptedWhisperTranscriber) Transcribe(ctx context.Context, _ []byte, _
 		s.responses = s.responses[1:]
 	}
 	return out, nil
+}
+
+func (s *scriptedWhisperTranscriber) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func TestLocalSTTSessionEmitsPartialBeforeCommit(t *testing.T) {
@@ -97,6 +105,62 @@ func TestLocalSTTSessionSuppressesDuplicatePartials(t *testing.T) {
 	}
 }
 
+func TestLocalSTTSessionCommitUsesFreshPartial(t *testing.T) {
+	transcriber := &scriptedWhisperTranscriber{
+		responses: []string{
+			"we can ship this today",
+		},
+	}
+	s := newTestLocalSTTSession(t, transcriber)
+	audio := zeroPCMBase64(bytesForAudioDuration(16000, 1200*time.Millisecond))
+
+	if err := s.SendAudioChunk(context.Background(), audio, 16000, false); err != nil {
+		t.Fatalf("SendAudioChunk(partial) error = %v", err)
+	}
+	_ = waitForSTTEventType(t, s.events, STTEventPartial, time.Second)
+
+	if err := s.SendAudioChunk(context.Background(), "", 16000, true); err != nil {
+		t.Fatalf("SendAudioChunk(commit) error = %v", err)
+	}
+	committed := waitForSTTEventType(t, s.events, STTEventCommitted, time.Second)
+	if strings.TrimSpace(committed.Text) != "we can ship this today" {
+		t.Fatalf("committed.Text = %q, want %q", committed.Text, "we can ship this today")
+	}
+	if transcriber.Calls() != 1 {
+		t.Fatalf("Transcribe calls = %d, want 1 (partial reused for commit)", transcriber.Calls())
+	}
+}
+
+func TestLocalSTTSessionCommitDoesNotUseContinuationPartial(t *testing.T) {
+	transcriber := &scriptedWhisperTranscriber{
+		responses: []string{
+			"and then we can",
+			"and then we can ship this today",
+		},
+	}
+	s := newTestLocalSTTSession(t, transcriber)
+	audio := zeroPCMBase64(bytesForAudioDuration(16000, 1200*time.Millisecond))
+
+	if err := s.SendAudioChunk(context.Background(), audio, 16000, false); err != nil {
+		t.Fatalf("SendAudioChunk(partial) error = %v", err)
+	}
+	partial := waitForSTTEventType(t, s.events, STTEventPartial, time.Second)
+	if strings.TrimSpace(partial.Text) != "and then we can" {
+		t.Fatalf("partial.Text = %q, want %q", partial.Text, "and then we can")
+	}
+
+	if err := s.SendAudioChunk(context.Background(), "", 16000, true); err != nil {
+		t.Fatalf("SendAudioChunk(commit) error = %v", err)
+	}
+	committed := waitForSTTEventType(t, s.events, STTEventCommitted, 2*time.Second)
+	if strings.TrimSpace(committed.Text) != "and then we can ship this today" {
+		t.Fatalf("committed.Text = %q, want %q", committed.Text, "and then we can ship this today")
+	}
+	if transcriber.Calls() != 2 {
+		t.Fatalf("Transcribe calls = %d, want 2 (full commit transcription expected)", transcriber.Calls())
+	}
+}
+
 func TestShouldEmitLocalPartialUpdate(t *testing.T) {
 	cases := []struct {
 		name string
@@ -117,6 +181,22 @@ func TestShouldEmitLocalPartialUpdate(t *testing.T) {
 				t.Fatalf("shouldEmitLocalPartialUpdate(%q, %q) = %v, want %v", tc.prev, tc.next, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestShouldUseLocalPartialAsCommit(t *testing.T) {
+	now := time.Now()
+	if !shouldUseLocalPartialAsCommit("we can ship this today", now, bytesForAudioDuration(16000, time.Second), 16000) {
+		t.Fatalf("expected fresh complete partial to be used as commit")
+	}
+	if shouldUseLocalPartialAsCommit("and then we can", now, bytesForAudioDuration(16000, time.Second), 16000) {
+		t.Fatalf("expected continuation-style partial to require full commit transcription")
+	}
+	if shouldUseLocalPartialAsCommit("ship", now, bytesForAudioDuration(16000, time.Second), 16000) {
+		t.Fatalf("expected too-short partial to be ignored")
+	}
+	if shouldUseLocalPartialAsCommit("we can ship this today", now.Add(-3*time.Second), bytesForAudioDuration(16000, time.Second), 16000) {
+		t.Fatalf("expected stale partial to be ignored")
 	}
 }
 

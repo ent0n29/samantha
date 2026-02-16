@@ -329,6 +329,7 @@ type localSTTSession struct {
 	partialToken         int64
 	partialLastStartedAt time.Time
 	partialLastText      string
+	partialLastAt        time.Time
 	partialWG            sync.WaitGroup
 }
 
@@ -349,6 +350,7 @@ type localSTTPartialJob struct {
 }
 
 const localSTTPartialMinDeltaRunes = 3
+const localSTTCommitFromPartialFreshWindow = 1200 * time.Millisecond
 
 func localSTTPartialConfigForProfile(profile string) localSTTPartialConfig {
 	cfg := localSTTPartialConfig{
@@ -415,6 +417,8 @@ func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, 
 	pcm := make([]byte, len(s.pcm))
 	copy(pcm, s.pcm)
 	s.pcm = s.pcm[:0]
+	partialText := strings.TrimSpace(s.partialLastText)
+	partialAt := s.partialLastAt
 	// Prefer "latest wins": cancel any in-flight transcription so we stay responsive.
 	if s.activeCancel != nil {
 		s.activeCancel()
@@ -428,9 +432,23 @@ func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, 
 	s.partialToken++
 	s.partialLastStartedAt = time.Time{}
 	s.partialLastText = ""
+	s.partialLastAt = time.Time{}
 	s.mu.Unlock()
 
 	if len(pcm) == 0 {
+		return nil
+	}
+
+	if shouldUseLocalPartialAsCommit(partialText, partialAt, len(pcm), sampleRate) {
+		select {
+		case s.events <- STTEvent{
+			Type:       STTEventCommitted,
+			Text:       partialText,
+			Confidence: 0.66,
+			Timestamp:  time.Now().UnixMilli(),
+		}:
+		default:
+		}
 		return nil
 	}
 
@@ -565,6 +583,7 @@ func (s *localSTTSession) startPartialTranscribe(job *localSTTPartialJob) {
 			return
 		}
 		s.partialLastText = text
+		s.partialLastAt = time.Now()
 		s.mu.Unlock()
 
 		select {
@@ -619,6 +638,53 @@ func bytesForAudioDuration(sampleRate int, d time.Duration) int {
 		return 0
 	}
 	return int(float64(sampleRate*2) * seconds)
+}
+
+func shouldUseLocalPartialAsCommit(partialText string, partialAt time.Time, audioBytes int, sampleRate int) bool {
+	partialText = strings.TrimSpace(partialText)
+	if partialText == "" || partialAt.IsZero() {
+		return false
+	}
+	if time.Since(partialAt) > localSTTCommitFromPartialFreshWindow {
+		return false
+	}
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	minAudioBytes := bytesForAudioDuration(sampleRate, 500*time.Millisecond)
+	if audioBytes < minAudioBytes {
+		return false
+	}
+	normalized := normalizeSemanticEndpointText(partialText)
+	if normalized == "" {
+		return false
+	}
+	leadCanon := canonicalizeForLeadFiller(partialText)
+	if isAssistantLeadFillerPrefix(leadCanon) || hasAssistantLeadFillerPhrase(leadCanon) {
+		return false
+	}
+	wordCount := 1 + strings.Count(normalized, " ")
+	if wordCount < 3 {
+		return false
+	}
+	// Avoid committing clearly unfinished clauses from a partial transcript.
+	if hasSemanticContinuationCue(normalized) && !hasSemanticTerminalCue(normalized) {
+		return false
+	}
+	return true
+}
+
+func hasAssistantLeadFillerPhrase(canon string) bool {
+	canon = strings.TrimSpace(canon)
+	if canon == "" {
+		return false
+	}
+	for _, phrase := range assistantLeadFillerPhrases {
+		if canon == phrase || strings.HasPrefix(canon, phrase+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *localSTTSession) worker() {
