@@ -14,6 +14,7 @@ type STTEvent struct {
 	Type       STTEventType
 	Text       string
 	Confidence float64
+	Source     string
 	Code       string
 	Detail     string
 	Retryable  bool

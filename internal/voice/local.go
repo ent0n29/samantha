@@ -445,6 +445,7 @@ func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, 
 			Type:       STTEventCommitted,
 			Text:       partialText,
 			Confidence: 0.66,
+			Source:     "partial_commit",
 			Timestamp:  time.Now().UnixMilli(),
 		}:
 		default:
@@ -747,6 +748,7 @@ func (s *localSTTSession) worker() {
 				Type:       STTEventCommitted,
 				Text:       text,
 				Confidence: 0.8,
+				Source:     "full_commit",
 				Timestamp:  time.Now().UnixMilli(),
 			}:
 			default:

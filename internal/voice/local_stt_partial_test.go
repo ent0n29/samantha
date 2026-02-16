@@ -70,6 +70,9 @@ func TestLocalSTTSessionEmitsPartialBeforeCommit(t *testing.T) {
 	if strings.TrimSpace(committed.Text) != "let me think through the plan" {
 		t.Fatalf("committed.Text = %q, want %q", committed.Text, "let me think through the plan")
 	}
+	if committed.Source != "full_commit" {
+		t.Fatalf("committed.Source = %q, want %q", committed.Source, "full_commit")
+	}
 }
 
 func TestLocalSTTSessionSuppressesDuplicatePartials(t *testing.T) {
@@ -126,6 +129,9 @@ func TestLocalSTTSessionCommitUsesFreshPartial(t *testing.T) {
 	if strings.TrimSpace(committed.Text) != "we can ship this today" {
 		t.Fatalf("committed.Text = %q, want %q", committed.Text, "we can ship this today")
 	}
+	if committed.Source != "partial_commit" {
+		t.Fatalf("committed.Source = %q, want %q", committed.Source, "partial_commit")
+	}
 	if transcriber.Calls() != 1 {
 		t.Fatalf("Transcribe calls = %d, want 1 (partial reused for commit)", transcriber.Calls())
 	}
@@ -155,6 +161,9 @@ func TestLocalSTTSessionCommitDoesNotUseContinuationPartial(t *testing.T) {
 	committed := waitForSTTEventType(t, s.events, STTEventCommitted, 2*time.Second)
 	if strings.TrimSpace(committed.Text) != "and then we can ship this today" {
 		t.Fatalf("committed.Text = %q, want %q", committed.Text, "and then we can ship this today")
+	}
+	if committed.Source != "full_commit" {
+		t.Fatalf("committed.Source = %q, want %q", committed.Source, "full_commit")
 	}
 	if transcriber.Calls() != 2 {
 		t.Fatalf("Transcribe calls = %d, want 2 (full commit transcription expected)", transcriber.Calls())

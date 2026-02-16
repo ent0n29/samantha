@@ -181,7 +181,7 @@ func (s *elevenSTTSession) readLoop() {
 		case "partial_transcript":
 			s.events <- STTEvent{Type: STTEventPartial, Text: asString(raw["text"]), Timestamp: time.Now().UnixMilli()}
 		case "committed_transcript", "committed_transcript_with_timestamps":
-			s.events <- STTEvent{Type: STTEventCommitted, Text: asString(raw["text"]), Timestamp: time.Now().UnixMilli()}
+			s.events <- STTEvent{Type: STTEventCommitted, Text: asString(raw["text"]), Source: "provider_commit", Timestamp: time.Now().UnixMilli()}
 		case "session_started":
 			// ignore control event
 		case "", "input_audio_chunk":

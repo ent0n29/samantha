@@ -48,7 +48,7 @@ func (s *mockSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, _
 		if strings.TrimSpace(s.lastInput) == "" {
 			text = ""
 		}
-		s.events <- STTEvent{Type: STTEventCommitted, Text: text, Confidence: 0.7, Timestamp: time.Now().UnixMilli()}
+		s.events <- STTEvent{Type: STTEventCommitted, Text: text, Confidence: 0.7, Source: "mock_commit", Timestamp: time.Now().UnixMilli()}
 	}
 	return nil
 }

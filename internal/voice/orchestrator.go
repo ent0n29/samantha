@@ -832,6 +832,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				if committedText == "" {
 					continue
 				}
+				if src := strings.TrimSpace(strings.ToLower(evt.Source)); src != "" {
+					o.metrics.ObserveTurnIndicator("stt_commit_source_" + normalizeControlReason(src))
+				}
 				utteranceStartedAt = time.Time{}
 				semanticHintState.Reset()
 				if !lastStopAt.IsZero() {
