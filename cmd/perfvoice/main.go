@@ -33,6 +33,7 @@ type options struct {
 	interTurnDelay time.Duration
 	turnTimeout    time.Duration
 	texts          []string
+	cacheBust      bool
 	verbose        bool
 }
 
@@ -106,6 +107,7 @@ func parseFlags() (options, error) {
 	flag.IntVar(&interTurnMS, "inter-turn-ms", 180, "delay between turns in milliseconds")
 	flag.IntVar(&turnTimeoutMS, "turn-timeout-ms", 15000, "timeout waiting for assistant_turn_end per turn in milliseconds")
 	flag.StringVar(&textsRaw, "texts", "", "utterances separated by '|' (optional)")
+	flag.BoolVar(&cfg.cacheBust, "cache-bust", true, "append a per-run nonce token to utterances to avoid cross-run brain-prefetch cache hits")
 	flag.BoolVar(&cfg.verbose, "verbose", true, "print replay progress")
 	flag.Parse()
 
@@ -155,6 +157,15 @@ func parseFlags() (options, error) {
 func run(cfg options) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
+
+	if cfg.cacheBust && len(cfg.texts) > 0 {
+		tag := fmt.Sprintf("r%x", time.Now().UnixNano()&0xfffff)
+		withTag := make([]string, 0, len(cfg.texts))
+		for _, t := range cfg.texts {
+			withTag = append(withTag, strings.TrimSpace(t)+" nonce "+tag)
+		}
+		cfg.texts = withTag
+	}
 
 	httpClient := &http.Client{Timeout: 45 * time.Second}
 	sessionID, err := createSession(ctx, httpClient, cfg)

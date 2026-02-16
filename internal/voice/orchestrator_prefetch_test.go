@@ -188,6 +188,12 @@ func TestShouldKeepBrainPrefetchInFlight(t *testing.T) {
 			want:     false,
 		},
 		{
+			name:     "small internal correction keeps in-flight",
+			inFlight: "build api end point with auth middleware",
+			incoming: "build api endpoint with auth middleware",
+			want:     true,
+		},
+		{
 			name:     "incoming rollback should restart",
 			inFlight: "build api endpoint with auth middleware",
 			incoming: "build api endpoint",

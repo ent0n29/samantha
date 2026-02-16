@@ -35,8 +35,9 @@ const (
 var (
 	semanticContinuationTailRe         = regexp.MustCompile(`(?i)\b(and|but|because|so|then|which|that|if|when|while|as|to|for)\s*$`)
 	semanticContinuationOpenWordTailRe = regexp.MustCompile(`(?i)\b(a|an|the|my|your|our|this|that|these|those|to|for|with|from|about|into|onto|over|under|between|through|during|without|within|across|around|before|after)\s*$`)
+	semanticContinuationAuxTailRe      = regexp.MustCompile(`(?i)\b(am|is|are|was|were|be|being|been|have|has|had|do|does|did|can|could|would|should|will|may|might|must)\s*$`)
 	semanticContinuationHeadRe         = regexp.MustCompile(`(?i)^(and|but|because|so|then)\b`)
-	semanticContinuationPhrase         = regexp.MustCompile(`(?i)\b(i mean|for example|for instance|in order to)\s*$`)
+	semanticContinuationPhrase         = regexp.MustCompile(`(?i)\b(i mean|for example|for instance|in order to|going to|want to|need to|trying to|plan to)\s*$`)
 	semanticTerminalTailRe             = regexp.MustCompile(`(?i)([.!?]["']?\s*$|\b(done|thanks|thank you|that's all|thats all)\s*$)`)
 	semanticOpenTailRe                 = regexp.MustCompile(`[,;:\-…]\s*$`)
 )
@@ -51,7 +52,7 @@ func buildSemanticEndpointHint(partial string, confidence float64, utteranceAge 
 	hint := semanticEndpointHint{
 		Reason:     "neutral",
 		Confidence: maxFloat(0.58, confidence),
-		Hold:       210 * time.Millisecond,
+		Hold:       260 * time.Millisecond,
 	}
 
 	continuation := hasSemanticContinuationCue(normalized)
@@ -59,7 +60,7 @@ func buildSemanticEndpointHint(partial string, confidence float64, utteranceAge 
 	if continuation {
 		hint.Reason = "continuation"
 		hint.Confidence = maxFloat(hint.Confidence, 0.86)
-		hint.Hold = 520 * time.Millisecond
+		hint.Hold = 680 * time.Millisecond
 	}
 	if terminal {
 		hint.Reason = "terminal"
@@ -74,7 +75,7 @@ func buildSemanticEndpointHint(partial string, confidence float64, utteranceAge 
 	}
 
 	if utteranceAge > 0 && utteranceAge < 700*time.Millisecond {
-		hint.Hold += 110 * time.Millisecond
+		hint.Hold += 130 * time.Millisecond
 		if hint.Reason == "neutral" {
 			hint.Reason = "short_utterance"
 		}
@@ -152,6 +153,9 @@ func hasSemanticContinuationCue(normalized string) bool {
 		return true
 	}
 	if semanticContinuationOpenWordTailRe.MatchString(normalized) {
+		return true
+	}
+	if semanticContinuationAuxTailRe.MatchString(normalized) {
 		return true
 	}
 	if semanticContinuationPhrase.MatchString(normalized) {

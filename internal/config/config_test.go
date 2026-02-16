@@ -66,8 +66,8 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.UIAudioSegmentOverlap != 22*time.Millisecond {
 		t.Fatalf("UIAudioSegmentOverlap = %s, want 22ms", cfg.UIAudioSegmentOverlap)
 	}
-	if cfg.UIFillerMode != "adaptive" {
-		t.Fatalf("UIFillerMode = %q, want %q", cfg.UIFillerMode, "adaptive")
+	if cfg.UIFillerMode != "off" {
+		t.Fatalf("UIFillerMode = %q, want %q", cfg.UIFillerMode, "off")
 	}
 	if cfg.UIFillerMinDelay != 1200*time.Millisecond {
 		t.Fatalf("UIFillerMinDelay = %s, want 1200ms", cfg.UIFillerMinDelay)

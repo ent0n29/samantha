@@ -140,7 +140,7 @@ func Load() (Config, error) {
 		UITaskDeskDefault:         false,
 		UISilenceBreakerMode:      envOrDefault("APP_UI_SILENCE_BREAKER_MODE", "visual"),
 		UIVADProfile:              envOrDefault("APP_UI_VAD_PROFILE", "default"),
-		UIFillerMode:              envOrDefault("APP_FILLER_MODE", "adaptive"),
+		UIFillerMode:              envOrDefault("APP_FILLER_MODE", "off"),
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
@@ -332,7 +332,7 @@ func Load() (Config, error) {
 	}
 	cfg.UIFillerMode = strings.ToLower(trimSpace(cfg.UIFillerMode))
 	if cfg.UIFillerMode == "" {
-		cfg.UIFillerMode = "occasional"
+		cfg.UIFillerMode = "off"
 	}
 	if cfg.UIFillerMode != "off" && cfg.UIFillerMode != "adaptive" && cfg.UIFillerMode != "occasional" && cfg.UIFillerMode != "always" {
 		return Config{}, fmt.Errorf("APP_FILLER_MODE must be one of: off|adaptive|occasional|always")

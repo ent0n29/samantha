@@ -117,7 +117,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `APP_UI_VAD_MIN_UTTERANCE` (minimum utterance before client auto-commit can fire)
 - `APP_UI_VAD_GRACE` (extra silence grace before client auto-commit)
 - `APP_UI_AUDIO_SEGMENT_OVERLAP` (crossfade overlap between streamed playback segments)
-- `APP_FILLER_MODE=off|adaptive|occasional|always` (waiting backchannel policy; `adaptive` is default)
+- `APP_FILLER_MODE=off|adaptive|occasional|always` (waiting backchannel policy; `off` is default)
 - `APP_FILLER_MIN_DELAY`, `APP_FILLER_COOLDOWN`, `APP_FILLER_MAX_PER_TURN` (anti-spam filler controls)
 - `APP_UI_TASK_DESK_DEFAULT` (keep Task Desk hidden by default in core `/ui/`)
 - `APP_TASK_RUNTIME_ENABLED`, `APP_TASK_TIMEOUT`, `APP_TASK_IDEMPOTENCY_WINDOW` (voice-to-task runtime)

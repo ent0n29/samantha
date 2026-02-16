@@ -45,6 +45,11 @@ const VAD_SEMANTIC_HOLD_MS_MAX = 900;
 const VAD_SEMANTIC_HOLD_MS_MIN = 0;
 const VAD_SEMANTIC_RELEASE_FRAME_MS = 140;
 const VAD_SEMANTIC_COMMIT_RELEASE_DELTA = -1;
+const VAD_MIN_FRAME_COMMIT_SILENCE_MS = 170;
+const VAD_NEUTRAL_COMMIT_SILENCE_MS = 300;
+const VAD_SHORT_UTTERANCE_COMMIT_SILENCE_MS = 340;
+const VAD_CONTINUATION_COMMIT_SILENCE_MS = 760;
+const VAD_COMMIT_SILENCE_FLOOR_MAX_MS = 1600;
 const VAD_PARTIAL_FRESH_HOLD_MS = 420;
 const VAD_PARTIAL_PROGRESS_HOLD_MS = 360;
 const VAD_PARTIAL_ENDPOINT_FRAME_MS = 110;
@@ -82,7 +87,7 @@ const THINKING_CUE_GAIN = 0.045;
 const THINKING_CUE_FREQ_START_HZ = 690;
 const THINKING_CUE_FREQ_END_HZ = 560;
 const HANDSFREE_AWAKE_WINDOW_MS = 30_000;
-const FILLER_MODE_DEFAULT = "adaptive";
+const FILLER_MODE_DEFAULT = "off";
 const FILLER_MODE_ALLOWED = new Set(["off", "adaptive", "occasional", "always"]);
 const FILLER_MIN_DELAY_MS_DEFAULT = 1200;
 const FILLER_MIN_DELAY_MS_MIN = 0;
@@ -1280,7 +1285,10 @@ function hasContinuationCue(partialText) {
   if (/\b(a|an|the|my|your|our|this|that|these|those|to|for|with|from|about|into|onto|over|under|between|through|during|without|within|across|around|before|after)\b\s*$/.test(t)) {
     return true;
   }
-  if (/\b(i mean|for example|for instance|in order to)\b\s*$/.test(t)) {
+  if (/\b(am|is|are|was|were|be|being|been|have|has|had|do|does|did|can|could|would|should|will|may|might|must)\b\s*$/.test(t)) {
+    return true;
+  }
+  if (/\b(i mean|for example|for instance|in order to|going to|want to|need to|trying to|plan to)\b\s*$/.test(t)) {
     return true;
   }
   return false;
@@ -1294,7 +1302,7 @@ function hasStrongStopCue(partialText) {
   if (/[.!?]["']?$/.test(t)) {
     return true;
   }
-  if (/\b(done|stop|thanks|thank you)\b$/.test(t)) {
+  if (/\b(done|stop|thanks|thank you|that's all|thats all)\b$/.test(t)) {
     return true;
   }
   return false;
@@ -1437,6 +1445,35 @@ function adaptiveReleaseFrames(baseRelease, utteranceMs, partialText) {
   return { release, continuationHold };
 }
 
+function semanticCommitSilenceFloorMs(now, utteranceMs, partialText) {
+  let floor = VAD_MIN_FRAME_COMMIT_SILENCE_MS;
+  const partial = String(partialText || "");
+  const partialAge = state.lastPartialAtMs > 0 ? now - state.lastPartialAtMs : Number.POSITIVE_INFINITY;
+  const partialFresh = partial && partialAge <= VAD_SEMANTIC_HINT_STALE_MS;
+
+  if (partialFresh) {
+    if (hasContinuationCue(partial)) {
+      floor = Math.max(floor, VAD_CONTINUATION_COMMIT_SILENCE_MS);
+    } else if (!hasStrongStopCue(partial)) {
+      const neutralFloor = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS
+        ? VAD_SHORT_UTTERANCE_COMMIT_SILENCE_MS
+        : VAD_NEUTRAL_COMMIT_SILENCE_MS;
+      floor = Math.max(floor, neutralFloor);
+    }
+  }
+
+  const semantic = activeSemanticHint();
+  if (semantic) {
+    if (semantic.shouldCommit) {
+      floor = Math.min(floor, 220);
+    } else {
+      floor = Math.max(floor, 240 + normalizeSemanticHintHoldMs(semantic.holdMs));
+    }
+  }
+
+  return Math.min(VAD_COMMIT_SILENCE_FLOOR_MAX_MS, Math.max(VAD_MIN_FRAME_COMMIT_SILENCE_MS, Math.round(floor)));
+}
+
 function maybeAutoCommit() {
   if (!state.micActive || !state.connected) {
     return;
@@ -1473,6 +1510,7 @@ function maybeAutoCommit() {
     }
   }
   silenceTargetMs += partialStabilityHoldMs(now);
+  silenceTargetMs = Math.max(silenceTargetMs, semanticCommitSilenceFloorMs(now, utteranceMs, state.lastPartialText));
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
   if (silenceMs < silenceTargetMs) {
@@ -2991,6 +3029,10 @@ function processMicFrame(input, inputSampleRate) {
   const extraRelease = partialEndpointExtraReleaseFrames(now);
   state.utteranceHadContinuationHold = endpoint.continuationHold;
   if (!speechLike && state.vadSilenceFrames >= endpoint.release + extraRelease) {
+    const silenceMs = now - state.lastVoiceAtMs;
+    if (silenceMs < semanticCommitSilenceFloorMs(now, utteranceMs, state.lastPartialText)) {
+      return;
+    }
     flushQueuedMicPCM(now, true);
     state.lastAutoCommitAtMs = now;
     state.sawSpeech = false;

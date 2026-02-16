@@ -16,7 +16,7 @@ type FallbackAdapter struct {
 	fallback Adapter
 }
 
-var fallbackFirstDeltaTimeout = 450 * time.Millisecond
+var fallbackFirstDeltaTimeout = 900 * time.Millisecond
 var fallbackFirstDeltaRetries = 0
 
 func NewFallbackAdapter(primary Adapter, fallback Adapter) *FallbackAdapter {

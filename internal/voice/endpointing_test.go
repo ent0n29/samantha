@@ -37,6 +37,38 @@ func TestBuildSemanticEndpointHintContinuationOpenTailWord(t *testing.T) {
 	}
 }
 
+func TestBuildSemanticEndpointHintContinuationAuxTail(t *testing.T) {
+	hint, ok := buildSemanticEndpointHint("we can", 0.8, 900*time.Millisecond)
+	if !ok {
+		t.Fatalf("buildSemanticEndpointHint() ok=false, want true")
+	}
+	if hint.Reason != "continuation" {
+		t.Fatalf("Reason = %q, want %q", hint.Reason, "continuation")
+	}
+	if hint.Hold < 500*time.Millisecond {
+		t.Fatalf("Hold = %s, want >= 500ms for aux-tail continuation", hint.Hold)
+	}
+	if hint.ShouldCommit {
+		t.Fatalf("ShouldCommit = true, want false")
+	}
+}
+
+func TestBuildSemanticEndpointHintContinuationIntentTail(t *testing.T) {
+	hint, ok := buildSemanticEndpointHint("i want to", 0.79, 1200*time.Millisecond)
+	if !ok {
+		t.Fatalf("buildSemanticEndpointHint() ok=false, want true")
+	}
+	if hint.Reason != "continuation" {
+		t.Fatalf("Reason = %q, want %q", hint.Reason, "continuation")
+	}
+	if hint.Hold < 500*time.Millisecond {
+		t.Fatalf("Hold = %s, want >= 500ms for intent-tail continuation", hint.Hold)
+	}
+	if hint.ShouldCommit {
+		t.Fatalf("ShouldCommit = true, want false")
+	}
+}
+
 func TestBuildSemanticEndpointHintTerminal(t *testing.T) {
 	hint, ok := buildSemanticEndpointHint("that is all.", 0.84, 2*time.Second)
 	if !ok {

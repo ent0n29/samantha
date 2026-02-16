@@ -81,7 +81,7 @@ Response (`200`):
   "vad_grace_ms": 220,
   "audio_overlap_ms": 22,
   "local_stt_profile": "balanced",
-  "filler_mode": "adaptive",
+  "filler_mode": "off",
   "filler_min_delay_ms": 1200,
   "filler_cooldown_ms": 18000,
   "filler_max_per_turn": 1

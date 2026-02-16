@@ -353,6 +353,7 @@ const (
 	localSTTPartialMinDeltaRunes           = 2
 	localSTTCommitFromPartialFreshWindow   = 1200 * time.Millisecond
 	localSTTCommitFromPartialMinAudio      = 500 * time.Millisecond
+	localSTTCommitFromPartialMaxAudio      = 3200 * time.Millisecond
 	localSTTCommitFromTerminalMinAudio     = 320 * time.Millisecond
 	localSTTCommitFromTerminalMinWordCount = 2
 	localSTTCommitFromDefaultMinWordCount  = 3
@@ -361,17 +362,17 @@ const (
 func localSTTPartialConfigForProfile(profile string) localSTTPartialConfig {
 	cfg := localSTTPartialConfig{
 		Enabled:     true,
-		MinInterval: 380 * time.Millisecond,
-		MinAudio:    420 * time.Millisecond,
-		MaxTail:     4 * time.Second,
+		MinInterval: 260 * time.Millisecond,
+		MinAudio:    260 * time.Millisecond,
+		MaxTail:     2800 * time.Millisecond,
 		Timeout:     5 * time.Second,
 	}
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "fast":
-		cfg.MinInterval = 260 * time.Millisecond
-		cfg.MinAudio = 280 * time.Millisecond
-		cfg.MaxTail = 3 * time.Second
-		cfg.Timeout = 4 * time.Second
+		cfg.MinInterval = 170 * time.Millisecond
+		cfg.MinAudio = 180 * time.Millisecond
+		cfg.MaxTail = 2 * time.Second
+		cfg.Timeout = 3500 * time.Millisecond
 	case "accurate":
 		cfg.MinInterval = 750 * time.Millisecond
 		cfg.MinAudio = 950 * time.Millisecond
@@ -669,6 +670,10 @@ func shouldUseLocalPartialAsCommit(partialText string, partialAt time.Time, audi
 	}
 	minAudioBytes := bytesForAudioDuration(sampleRate, minAudio)
 	if audioBytes < minAudioBytes {
+		return false
+	}
+	maxAudioBytes := bytesForAudioDuration(sampleRate, localSTTCommitFromPartialMaxAudio)
+	if maxAudioBytes > 0 && audioBytes > maxAudioBytes {
 		return false
 	}
 	leadCanon := canonicalizeForLeadFiller(partialText)

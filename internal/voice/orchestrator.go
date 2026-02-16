@@ -68,9 +68,12 @@ const (
 	memoryContextSoftWait         = 120 * time.Millisecond
 	memoryContextPrefetchFresh    = 2 * time.Second
 	brainPrefetchFresh            = 3 * time.Second
-	brainPrefetchWaitBudget       = 120 * time.Millisecond
-	brainPrefetchWaitMatureAfter  = 320 * time.Millisecond
-	brainPrefetchWaitBudgetMature = 1400 * time.Millisecond
+	brainPrefetchWaitBudget       = 280 * time.Millisecond
+	brainPrefetchWaitMatureAfter  = 220 * time.Millisecond
+	brainPrefetchWaitBudgetMature = 1600 * time.Millisecond
+	brainPrefetchShortMaxWords    = 8
+	brainPrefetchWaitBudgetShort  = 900 * time.Millisecond
+	brainPrefetchWaitBudgetShortM = 2400 * time.Millisecond
 	brainPrefetchMinCanonical     = 4
 	brainPrefetchMinWords         = 2
 	brainPrefetchStableRepeats    = 1
@@ -526,8 +529,19 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		}
 		brainPrefetchMu.Unlock()
 		if done != nil {
+			canonicalWords := wordsInCanonical(canonical)
+			shortCanonical := canonicalWords > 0 && canonicalWords <= brainPrefetchShortMaxWords
 			waitBudget := brainPrefetchWaitBudget
-			if !startedAt.IsZero() && time.Since(startedAt) >= brainPrefetchWaitMatureAfter {
+			mature := !startedAt.IsZero() && time.Since(startedAt) >= brainPrefetchWaitMatureAfter
+			if shortCanonical {
+				waitBudget = brainPrefetchWaitBudgetShort
+				if mature {
+					waitBudget = brainPrefetchWaitBudgetShortM
+					o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_short_mature").Inc()
+				} else {
+					o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_short").Inc()
+				}
+			} else if mature {
 				waitBudget = brainPrefetchWaitBudgetMature
 				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_mature").Inc()
 			}
@@ -2415,6 +2429,20 @@ func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string
 	if inFlightCanonical == incomingCanonical {
 		return true
 	}
+	inFlightWords := wordsInCanonical(inFlightCanonical)
+	incomingWords := wordsInCanonical(incomingCanonical)
+	// If STT collapses the utterance by multiple words, treat it as a real rewrite and restart.
+	if incomingWords+1 < inFlightWords {
+		return false
+	}
+	if compactCanonical(inFlightCanonical) == compactCanonical(incomingCanonical) {
+		return true
+	}
+	// Keep the speculative run when canonical transcripts are still strongly compatible.
+	// This avoids cancel/restart churn from small STT rewrites ("end point" -> "endpoint").
+	if brainPrefetchCanonicalCompatible(inFlightCanonical, incomingCanonical) {
+		return true
+	}
 	// Keep an in-flight speculative response when the new transcript is an extension of
 	// the existing canonical input. This prevents cancel/restart churn while the user is
 	// still speaking and materially increases prefetch hit probability at commit time.
@@ -2424,6 +2452,22 @@ func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string
 		}
 	}
 	return false
+}
+
+func compactCanonical(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for _, r := range raw {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func sharedWordPrefixCount(a, b []string) int {
