@@ -93,3 +93,51 @@ func TestShouldStartBrainPrefetchEarly(t *testing.T) {
 		})
 	}
 }
+
+func TestBrainPrefetchCanonicalCompatible(t *testing.T) {
+	cases := []struct {
+		name      string
+		prefetch  string
+		committed string
+		want      bool
+	}{
+		{
+			name:      "exact match",
+			prefetch:  "build api endpoint with auth",
+			committed: "build api endpoint with auth",
+			want:      true,
+		},
+		{
+			name:      "progressive continuation match",
+			prefetch:  "build api endpoint",
+			committed: "build api endpoint with auth and tests",
+			want:      true,
+		},
+		{
+			name:      "tiny trailing correction still matches",
+			prefetch:  "build api endpoint with auth middleware",
+			committed: "build api endpoint with auth middlewares",
+			want:      true,
+		},
+		{
+			name:      "small unrelated tail rewrite does not match",
+			prefetch:  "build api endpoint with auth middleware",
+			committed: "build api endpoint for markdown parser",
+			want:      false,
+		},
+		{
+			name:      "short text is too risky for fuzzy match",
+			prefetch:  "build api now",
+			committed: "build api tomorrow",
+			want:      false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := brainPrefetchCanonicalCompatible(tc.prefetch, tc.committed); got != tc.want {
+				t.Fatalf("brainPrefetchCanonicalCompatible(%q, %q) = %v, want %v", tc.prefetch, tc.committed, got, tc.want)
+			}
+		})
+	}
+}

@@ -371,12 +371,13 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			if brainPrefetchResultVal == nil {
 				return nil
 			}
-			if brainPrefetchResultVal.canonicalInput != canonical {
+			if !brainPrefetchCanonicalCompatible(brainPrefetchResultVal.canonicalInput, canonical) {
 				return nil
 			}
 			if brainPrefetchReadyAt.IsZero() || time.Since(brainPrefetchReadyAt) > brainPrefetchFresh {
 				return nil
 			}
+			wasExactMatch := brainPrefetchResultVal.canonicalInput == canonical
 			out := &brainPrefetchResult{
 				canonicalInput: brainPrefetchResultVal.canonicalInput,
 				deltas:         append([]string(nil), brainPrefetchResultVal.deltas...),
@@ -384,6 +385,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			}
 			brainPrefetchResultVal = nil
 			brainPrefetchReadyAt = time.Time{}
+			if !wasExactMatch {
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_fuzzy_hit").Inc()
+			}
 			return out
 		}
 		if ready := getReady(); ready != nil {
@@ -392,7 +396,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 		var done chan struct{}
 		brainPrefetchMu.Lock()
-		if brainPrefetchInFlight && brainPrefetchCanonical == canonical {
+		if brainPrefetchInFlight && brainPrefetchCanonicalCompatible(brainPrefetchCanonical, canonical) {
 			done = brainPrefetchDone
 		}
 		brainPrefetchMu.Unlock()
@@ -2099,6 +2103,63 @@ func shouldSpeculateBrainCanonical(canonical string) bool {
 		}
 	}
 	return words >= brainPrefetchMinWords
+}
+
+func brainPrefetchCanonicalCompatible(prefetchedCanonical, committedCanonical string) bool {
+	prefetchedCanonical = strings.TrimSpace(prefetchedCanonical)
+	committedCanonical = strings.TrimSpace(committedCanonical)
+	if prefetchedCanonical == "" || committedCanonical == "" {
+		return false
+	}
+	if prefetchedCanonical == committedCanonical {
+		return true
+	}
+	// Common case: one canonical transcript is an incremental extension/rollback of the other.
+	if canonicalIsProgressiveContinuation(prefetchedCanonical, committedCanonical) ||
+		canonicalIsProgressiveContinuation(committedCanonical, prefetchedCanonical) {
+		return true
+	}
+	// Guarded fuzzy match for tiny STT corrections:
+	// require a strong shared word prefix and only allow one trailing mismatch.
+	pWords := strings.Fields(prefetchedCanonical)
+	cWords := strings.Fields(committedCanonical)
+	minWords := len(pWords)
+	if len(cWords) < minWords {
+		minWords = len(cWords)
+	}
+	if minWords < 4 {
+		return false
+	}
+	if absInt(len(pWords)-len(cWords)) > 2 {
+		return false
+	}
+	shared := sharedWordPrefixCount(pWords, cWords)
+	return shared >= minWords-1 && shared >= 3
+}
+
+func sharedWordPrefixCount(a, b []string) int {
+	if len(a) == 0 || len(b) == 0 {
+		return 0
+	}
+	limit := len(a)
+	if len(b) < limit {
+		limit = len(b)
+	}
+	count := 0
+	for i := 0; i < limit; i++ {
+		if a[i] != b[i] {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func shouldStartBrainPrefetchEarly(partialText, canonical string, utteranceAge time.Duration) bool {
