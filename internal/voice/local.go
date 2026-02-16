@@ -350,7 +350,7 @@ type localSTTPartialJob struct {
 }
 
 const (
-	localSTTPartialMinDeltaRunes           = 3
+	localSTTPartialMinDeltaRunes           = 2
 	localSTTCommitFromPartialFreshWindow   = 1200 * time.Millisecond
 	localSTTCommitFromPartialMinAudio      = 500 * time.Millisecond
 	localSTTCommitFromTerminalMinAudio     = 320 * time.Millisecond
@@ -361,22 +361,22 @@ const (
 func localSTTPartialConfigForProfile(profile string) localSTTPartialConfig {
 	cfg := localSTTPartialConfig{
 		Enabled:     true,
-		MinInterval: 550 * time.Millisecond,
-		MinAudio:    700 * time.Millisecond,
-		MaxTail:     7 * time.Second,
-		Timeout:     8 * time.Second,
+		MinInterval: 380 * time.Millisecond,
+		MinAudio:    420 * time.Millisecond,
+		MaxTail:     4 * time.Second,
+		Timeout:     5 * time.Second,
 	}
 	switch strings.ToLower(strings.TrimSpace(profile)) {
 	case "fast":
-		cfg.MinInterval = 420 * time.Millisecond
-		cfg.MinAudio = 500 * time.Millisecond
-		cfg.MaxTail = 6 * time.Second
-		cfg.Timeout = 6 * time.Second
+		cfg.MinInterval = 260 * time.Millisecond
+		cfg.MinAudio = 280 * time.Millisecond
+		cfg.MaxTail = 3 * time.Second
+		cfg.Timeout = 4 * time.Second
 	case "accurate":
-		cfg.MinInterval = 950 * time.Millisecond
-		cfg.MinAudio = 1200 * time.Millisecond
-		cfg.MaxTail = 9 * time.Second
-		cfg.Timeout = 12 * time.Second
+		cfg.MinInterval = 750 * time.Millisecond
+		cfg.MinAudio = 950 * time.Millisecond
+		cfg.MaxTail = 7 * time.Second
+		cfg.Timeout = 10 * time.Second
 	}
 	return cfg
 }

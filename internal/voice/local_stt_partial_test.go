@@ -180,6 +180,7 @@ func TestShouldEmitLocalPartialUpdate(t *testing.T) {
 		{name: "first", prev: "", next: "hello", want: true},
 		{name: "same", prev: "hello", next: "hello", want: false},
 		{name: "short extension", prev: "hello", next: "hello!", want: false},
+		{name: "two rune extension", prev: "hello", next: "hello!!", want: true},
 		{name: "long extension", prev: "hello", next: "hello there", want: true},
 		{name: "regression", prev: "hello there", next: "hello", want: false},
 	}
@@ -212,6 +213,50 @@ func TestShouldUseLocalPartialAsCommit(t *testing.T) {
 	}
 	if shouldUseLocalPartialAsCommit("do it.", now, bytesForAudioDuration(16000, 220*time.Millisecond), 16000) {
 		t.Fatalf("expected too-short audio window to be ignored even for terminal partial")
+	}
+}
+
+func TestLocalSTTPartialConfigForProfile(t *testing.T) {
+	balanced := localSTTPartialConfigForProfile("balanced")
+	if balanced.MinInterval != 380*time.Millisecond {
+		t.Fatalf("balanced MinInterval = %v, want %v", balanced.MinInterval, 380*time.Millisecond)
+	}
+	if balanced.MinAudio != 420*time.Millisecond {
+		t.Fatalf("balanced MinAudio = %v, want %v", balanced.MinAudio, 420*time.Millisecond)
+	}
+	if balanced.MaxTail != 4*time.Second {
+		t.Fatalf("balanced MaxTail = %v, want %v", balanced.MaxTail, 4*time.Second)
+	}
+	if balanced.Timeout != 5*time.Second {
+		t.Fatalf("balanced Timeout = %v, want %v", balanced.Timeout, 5*time.Second)
+	}
+
+	fast := localSTTPartialConfigForProfile("fast")
+	if fast.MinInterval != 260*time.Millisecond {
+		t.Fatalf("fast MinInterval = %v, want %v", fast.MinInterval, 260*time.Millisecond)
+	}
+	if fast.MinAudio != 280*time.Millisecond {
+		t.Fatalf("fast MinAudio = %v, want %v", fast.MinAudio, 280*time.Millisecond)
+	}
+	if fast.MaxTail != 3*time.Second {
+		t.Fatalf("fast MaxTail = %v, want %v", fast.MaxTail, 3*time.Second)
+	}
+	if fast.Timeout != 4*time.Second {
+		t.Fatalf("fast Timeout = %v, want %v", fast.Timeout, 4*time.Second)
+	}
+
+	accurate := localSTTPartialConfigForProfile("accurate")
+	if accurate.MinInterval != 750*time.Millisecond {
+		t.Fatalf("accurate MinInterval = %v, want %v", accurate.MinInterval, 750*time.Millisecond)
+	}
+	if accurate.MinAudio != 950*time.Millisecond {
+		t.Fatalf("accurate MinAudio = %v, want %v", accurate.MinAudio, 950*time.Millisecond)
+	}
+	if accurate.MaxTail != 7*time.Second {
+		t.Fatalf("accurate MaxTail = %v, want %v", accurate.MaxTail, 7*time.Second)
+	}
+	if accurate.Timeout != 10*time.Second {
+		t.Fatalf("accurate Timeout = %v, want %v", accurate.Timeout, 10*time.Second)
 	}
 }
 

@@ -63,22 +63,24 @@ type Orchestrator struct {
 }
 
 const (
-	memoryContextLimit           = 8
-	memoryContextTimeout         = 350 * time.Millisecond
-	memoryContextSoftWait        = 120 * time.Millisecond
-	memoryContextPrefetchFresh   = 2 * time.Second
-	brainPrefetchFresh           = 3 * time.Second
-	brainPrefetchWaitBudget      = 120 * time.Millisecond
-	brainPrefetchMinCanonical    = 18
-	brainPrefetchMinWords        = 3
-	brainPrefetchStableRepeats   = 2
-	brainPrefetchDebounce        = 420 * time.Millisecond
-	brainPrefetchEarlyMinWords   = 4
-	brainPrefetchEarlyAge        = 2 * time.Second
-	wakeWordWindow               = 30 * time.Second
-	memorySaveTimeout            = 2 * time.Second
-	ttsFinalizeTimeout           = 10 * time.Second
-	thinkingDeltaPreviewMaxRunes = 92
+	memoryContextLimit            = 8
+	memoryContextTimeout          = 350 * time.Millisecond
+	memoryContextSoftWait         = 120 * time.Millisecond
+	memoryContextPrefetchFresh    = 2 * time.Second
+	brainPrefetchFresh            = 3 * time.Second
+	brainPrefetchWaitBudget       = 120 * time.Millisecond
+	brainPrefetchWaitMatureAfter  = 400 * time.Millisecond
+	brainPrefetchWaitBudgetMature = 900 * time.Millisecond
+	brainPrefetchMinCanonical     = 6
+	brainPrefetchMinWords         = 2
+	brainPrefetchStableRepeats    = 1
+	brainPrefetchDebounce         = 420 * time.Millisecond
+	brainPrefetchEarlyMinWords    = 2
+	brainPrefetchEarlyAge         = 2 * time.Second
+	wakeWordWindow                = 30 * time.Second
+	memorySaveTimeout             = 2 * time.Second
+	ttsFinalizeTimeout            = 10 * time.Second
+	thinkingDeltaPreviewMaxRunes  = 92
 )
 
 func NewOrchestrator(
@@ -286,11 +288,13 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		brainPrefetchDone      chan struct{}
 		brainPrefetchResultVal *brainPrefetchResult
 		brainPrefetchReadyAt   time.Time
+		brainPrefetchStartedAt time.Time
 
 		partialStableCanonical string
 		partialStableRepeats   int
 		lastBrainPrefetchAt    time.Time
 		utteranceStartedAt     time.Time
+		lastPartialAt          time.Time
 		semanticHintState      semanticEndpointDispatchState
 	)
 
@@ -353,6 +357,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		brainPrefetchDone = nil
 		brainPrefetchResultVal = nil
 		brainPrefetchReadyAt = time.Time{}
+		brainPrefetchStartedAt = time.Time{}
 		brainPrefetchMu.Unlock()
 		if cancel != nil {
 			cancel()
@@ -387,6 +392,8 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			brainPrefetchReadyAt = time.Time{}
 			if !wasExactMatch {
 				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_fuzzy_hit").Inc()
+			} else {
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_hit").Inc()
 			}
 			return out
 		}
@@ -394,17 +401,28 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			return ready
 		}
 
-		var done chan struct{}
+		var (
+			done      chan struct{}
+			startedAt time.Time
+		)
 		brainPrefetchMu.Lock()
 		if brainPrefetchInFlight && brainPrefetchCanonicalCompatible(brainPrefetchCanonical, canonical) {
 			done = brainPrefetchDone
+			startedAt = brainPrefetchStartedAt
 		}
 		brainPrefetchMu.Unlock()
 		if done != nil {
-			timer := time.NewTimer(brainPrefetchWaitBudget)
+			waitBudget := brainPrefetchWaitBudget
+			if !startedAt.IsZero() && time.Since(startedAt) >= brainPrefetchWaitMatureAfter {
+				waitBudget = brainPrefetchWaitBudgetMature
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_mature").Inc()
+			}
+			timer := time.NewTimer(waitBudget)
 			select {
 			case <-done:
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_hit").Inc()
 			case <-timer.C:
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_wait_timeout").Inc()
 			}
 			if !timer.Stop() {
 				select {
@@ -422,17 +440,22 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		if rawText == "" || !shouldSpeculateBrainCanonical(canonical) {
 			return
 		}
+		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_start_attempt").Inc()
 
 		brainPrefetchMu.Lock()
-		if brainPrefetchInFlight && brainPrefetchCanonical == canonical {
-			brainPrefetchMu.Unlock()
-			return
+		if brainPrefetchInFlight {
+			if shouldKeepBrainPrefetchInFlight(brainPrefetchCanonical, canonical) {
+				brainPrefetchMu.Unlock()
+				o.metrics.SessionEvents.WithLabelValues("brain_prefetch_kept_inflight").Inc()
+				return
+			}
 		}
 		if brainPrefetchResultVal != nil &&
-			brainPrefetchResultVal.canonicalInput == canonical &&
+			brainPrefetchCanonicalCompatible(brainPrefetchResultVal.canonicalInput, canonical) &&
 			!brainPrefetchReadyAt.IsZero() &&
 			time.Since(brainPrefetchReadyAt) < brainPrefetchFresh {
 			brainPrefetchMu.Unlock()
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_ready_reuse").Inc()
 			return
 		}
 
@@ -447,11 +470,13 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		brainPrefetchDone = doneCh
 		brainPrefetchResultVal = nil
 		brainPrefetchReadyAt = time.Time{}
+		brainPrefetchStartedAt = time.Now()
 		brainPrefetchMu.Unlock()
 
 		if oldCancel != nil {
 			oldCancel()
 		}
+		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_started").Inc()
 
 		recent, _, _ := getMemoryPrefetch()
 		contextLines := make([]string, 0, len(recent))
@@ -498,12 +523,17 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			}
 			brainPrefetchResultVal = ready
 			brainPrefetchReadyAt = time.Now()
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_ready").Inc()
 		}(specCtx, gen, canonical, rawText, doneCh, contextLines, personaID)
 	}
 
 	maybeStartBrainPrefetch := func(specText string, now time.Time, utteranceAge time.Duration) {
 		canonical := canonicalizeBrainPrefetchInput(specText)
 		if canonical == "" {
+			return
+		}
+		if !shouldSpeculateBrainCanonical(canonical) {
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_skip_short").Inc()
 			return
 		}
 		earlyStart := shouldStartBrainPrefetchEarly(specText, canonical, utteranceAge)
@@ -521,9 +551,11 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			requiredRepeats = 1
 		}
 		if partialStableRepeats < requiredRepeats {
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_skip_unstable").Inc()
 			return
 		}
 		if !lastBrainPrefetchAt.IsZero() && now.Sub(lastBrainPrefetchAt) < brainPrefetchDebounce {
+			o.metrics.SessionEvents.WithLabelValues("brain_prefetch_skip_debounce").Inc()
 			return
 		}
 		lastBrainPrefetchAt = now
@@ -773,6 +805,10 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			case STTEventPartial:
 				now := time.Now()
 				partialText := strings.TrimSpace(evt.Text)
+				if partialText != "" {
+					o.metrics.SessionEvents.WithLabelValues("stt_partial_seen").Inc()
+					lastPartialAt = now
+				}
 				if partialText != "" && utteranceStartedAt.IsZero() {
 					utteranceStartedAt = now
 				}
@@ -836,10 +872,15 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				if committedText == "" {
 					continue
 				}
+				now := time.Now()
 				if src := strings.TrimSpace(strings.ToLower(evt.Source)); src != "" {
 					o.metrics.ObserveTurnIndicator("stt_commit_source_" + normalizeControlReason(src))
 				}
+				if !lastPartialAt.IsZero() && now.After(lastPartialAt) {
+					o.metrics.ObserveTurnStage("partial_to_commit", now.Sub(lastPartialAt))
+				}
 				utteranceStartedAt = time.Time{}
+				lastPartialAt = time.Time{}
 				semanticHintState.Reset()
 				if !lastStopAt.IsZero() {
 					o.metrics.ObserveTurnStage("stop_to_stt_committed", time.Since(lastStopAt))
@@ -856,7 +897,6 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 					TSMs:      evt.Timestamp,
 				})
 
-				now := time.Now()
 				if !manualArmUntil.IsZero() && now.After(manualArmUntil) {
 					manualArmUntil = time.Time{}
 				}
@@ -2117,7 +2157,10 @@ func brainPrefetchCanonicalCompatible(prefetchedCanonical, committedCanonical st
 	// Common case: one canonical transcript is an incremental extension/rollback of the other.
 	if canonicalIsProgressiveContinuation(prefetchedCanonical, committedCanonical) ||
 		canonicalIsProgressiveContinuation(committedCanonical, prefetchedCanonical) {
-		return true
+		shared := sharedWordPrefixCount(strings.Fields(prefetchedCanonical), strings.Fields(committedCanonical))
+		if shared >= 2 {
+			return true
+		}
 	}
 	// Guarded fuzzy match for tiny STT corrections:
 	// require a strong shared word prefix and only allow one trailing mismatch.
@@ -2135,6 +2178,26 @@ func brainPrefetchCanonicalCompatible(prefetchedCanonical, committedCanonical st
 	}
 	shared := sharedWordPrefixCount(pWords, cWords)
 	return shared >= minWords-1 && shared >= 3
+}
+
+func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string) bool {
+	inFlightCanonical = strings.TrimSpace(inFlightCanonical)
+	incomingCanonical = strings.TrimSpace(incomingCanonical)
+	if inFlightCanonical == "" || incomingCanonical == "" {
+		return false
+	}
+	if inFlightCanonical == incomingCanonical {
+		return true
+	}
+	// Keep an in-flight speculative response when the new transcript is an extension of
+	// the existing canonical input. This prevents cancel/restart churn while the user is
+	// still speaking and materially increases prefetch hit probability at commit time.
+	if canonicalIsProgressiveContinuation(inFlightCanonical, incomingCanonical) {
+		if sharedWordPrefixCount(strings.Fields(inFlightCanonical), strings.Fields(incomingCanonical)) >= 2 {
+			return true
+		}
+	}
+	return false
 }
 
 func sharedWordPrefixCount(a, b []string) int {

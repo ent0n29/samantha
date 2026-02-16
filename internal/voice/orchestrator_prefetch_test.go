@@ -85,10 +85,17 @@ func TestShouldStartBrainPrefetchEarly(t *testing.T) {
 		},
 		{
 			name:        "short partial waits",
+			partialText: "build",
+			canonical:   "build",
+			utteranceMs: 700,
+			want:        false,
+		},
+		{
+			name:        "two-word partial can start early",
 			partialText: "build this",
 			canonical:   "build this",
 			utteranceMs: 700,
-			want:        false,
+			want:        true,
 		},
 	}
 	for _, tc := range cases {
@@ -144,6 +151,54 @@ func TestBrainPrefetchCanonicalCompatible(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := brainPrefetchCanonicalCompatible(tc.prefetch, tc.committed); got != tc.want {
 				t.Fatalf("brainPrefetchCanonicalCompatible(%q, %q) = %v, want %v", tc.prefetch, tc.committed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldKeepBrainPrefetchInFlight(t *testing.T) {
+	cases := []struct {
+		name     string
+		inFlight string
+		incoming string
+		want     bool
+	}{
+		{
+			name:     "exact canonical",
+			inFlight: "build api endpoint",
+			incoming: "build api endpoint",
+			want:     true,
+		},
+		{
+			name:     "incoming extends in-flight",
+			inFlight: "build api",
+			incoming: "build api endpoint with auth",
+			want:     true,
+		},
+		{
+			name:     "single-word prefix is too weak",
+			inFlight: "build",
+			incoming: "build api endpoint with auth",
+			want:     false,
+		},
+		{
+			name:     "incoming rewrites topic",
+			inFlight: "build api endpoint",
+			incoming: "design architecture diagram",
+			want:     false,
+		},
+		{
+			name:     "incoming rollback should restart",
+			inFlight: "build api endpoint with auth middleware",
+			incoming: "build api endpoint",
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldKeepBrainPrefetchInFlight(tc.inFlight, tc.incoming); got != tc.want {
+				t.Fatalf("shouldKeepBrainPrefetchInFlight(%q, %q) = %v, want %v", tc.inFlight, tc.incoming, got, tc.want)
 			}
 		})
 	}
