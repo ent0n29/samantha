@@ -50,3 +50,25 @@ func TestSplitTTSReadySegmentsLongTextRespectsBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestLocalTTSSegmentBounds(t *testing.T) {
+	min, max := localTTSSegmentBounds(false, 1.0)
+	if min != 24 || max != 220 {
+		t.Fatalf("first chunk bounds = (%d,%d), want (24,220)", min, max)
+	}
+
+	min, max = localTTSSegmentBounds(true, 1.0)
+	if min != 72 || max != 320 {
+		t.Fatalf("steady chunk bounds = (%d,%d), want (72,320)", min, max)
+	}
+
+	minFast, maxFast := localTTSSegmentBounds(true, 1.08)
+	if minFast >= min || maxFast >= max {
+		t.Fatalf("fast bounds = (%d,%d), want smaller than steady (%d,%d)", minFast, maxFast, min, max)
+	}
+
+	minSlow, maxSlow := localTTSSegmentBounds(true, 0.88)
+	if minSlow <= min || maxSlow <= max {
+		t.Fatalf("slow bounds = (%d,%d), want larger than steady (%d,%d)", minSlow, maxSlow, min, max)
+	}
+}

@@ -47,11 +47,19 @@ var (
 		"hang on",
 		"let me think for a second",
 		"let me think for a moment",
+		"let me think about that",
+		"let me think about it",
+		"let me think this through",
+		"let me think that through",
 		"let me think",
+		"i need a second to think",
+		"i need a moment to think",
+		"i need just a second to think",
+		"i need just a moment to think",
 		"while i think",
 	}
 	assistantLeadAckRe    = regexp.MustCompile(`(?is)^\s*(?:sure|okay|ok|alright|all right|got it|absolutely|yes|yep|yeah|certainly|of course|right|well|hmm|mmhm|mm\s*hmm+)(?:(?:\s*[\p{P}]+\s*)+|\s+$|$)`)
-	assistantLeadFillerRe = regexp.MustCompile(`(?is)^\s*(?:give me(?: just)? a (?:second|sec)(?: while i think| to think)?|just a (?:second|sec)|one (?:second|sec)(?: while i think)?|give me(?: just)? a moment(?: while i think| to think)?|just a moment|one moment|hold on|hang on|let me think(?: for a (?:second|moment))?|while i think)(?:(?:\s*[\p{P}]+\s*)+|\s+$|$)`)
+	assistantLeadFillerRe = regexp.MustCompile(`(?is)^\s*(?:give me(?: just)? a (?:second|sec)(?: while i think| to think)?|just a (?:second|sec)|one (?:second|sec)(?: while i think)?|give me(?: just)? a moment(?: while i think| to think)?|just a moment|one moment|hold on|hang on|let me think(?: for a (?:second|moment)| (?:about (?:that|it)|(?:this|that) through))?|i need(?: just)? a (?:second|sec|moment) to think|while i think)(?:(?:\s*[\p{P}]+\s*)+|\s+$|$)`)
 )
 
 type leadResponseFilter struct {

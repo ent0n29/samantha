@@ -699,12 +699,13 @@ type localTTSStream struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	mu          sync.Mutex
-	pending     string
-	segCh       chan string
-	segChClosed bool
-	closed      bool
-	segmentsOut int
+	mu               sync.Mutex
+	pending          string
+	segCh            chan string
+	segChClosed      bool
+	closed           bool
+	segmentsOut      int
+	firstChunkQueued bool
 
 	done chan struct{}
 }
@@ -722,12 +723,11 @@ func (s *localTTSStream) SendText(_ context.Context, text string, tryTrigger boo
 	if !s.closed {
 		s.pending += text
 		if tryTrigger {
-			minChars := 48
-			if s.segmentsOut == 0 {
-				// Keep first-audio latency reasonable, but avoid tiny "robotic" fragments.
-				minChars = 24
+			minChars, maxChars := localTTSSegmentBounds(s.firstChunkQueued, s.settings.Speed)
+			ready, s.pending = splitTTSReadySegments(s.pending, minChars, maxChars)
+			if len(ready) > 0 {
+				s.firstChunkQueued = true
 			}
-			ready, s.pending = splitTTSReadySegments(s.pending, minChars, 240)
 		}
 	}
 	s.mu.Unlock()
@@ -892,8 +892,22 @@ func splitTTSReadySegments(text string, minChars, maxChars int) ([]string, strin
 
 		// Keep first-audio latency low, but avoid over-fragmenting speech into very
 		// short chunks that sound robotic.
-		if cut < 0 && len(rest) >= minChars+56 {
-			fallbackLimit := minChars + 80
+		fallbackOffset := 56
+		if minChars > 56 {
+			fallbackOffset = (minChars / 2) + 28
+			if fallbackOffset > 110 {
+				fallbackOffset = 110
+			}
+		}
+		if cut < 0 && len(rest) >= minChars+fallbackOffset {
+			fallbackWindow := 80
+			if minChars > 56 {
+				fallbackWindow = (minChars / 2) + 64
+				if fallbackWindow > 160 {
+					fallbackWindow = 160
+				}
+			}
+			fallbackLimit := minChars + fallbackWindow
 			if fallbackLimit > len(rest) {
 				fallbackLimit = len(rest)
 			}
@@ -917,6 +931,42 @@ func splitTTSReadySegments(text string, minChars, maxChars int) ([]string, strin
 			return ready, ""
 		}
 	}
+}
+
+func localTTSSegmentBounds(firstChunkQueued bool, speed float64) (minChars, maxChars int) {
+	if !firstChunkQueued {
+		// First chunk prioritizes quick first audio.
+		return 24, 220
+	}
+
+	// Subsequent chunks prioritize continuity to avoid robotic start/stop prosody.
+	minChars = 72
+	maxChars = 320
+
+	switch {
+	case speed >= 1.04:
+		// Faster speech can use slightly shorter chunks without sounding clipped.
+		minChars -= 10
+		maxChars -= 20
+	case speed > 0 && speed <= 0.9:
+		// Slower speech benefits from longer clauses.
+		minChars += 10
+		maxChars += 20
+	}
+
+	if minChars < 56 {
+		minChars = 56
+	}
+	if minChars > 110 {
+		minChars = 110
+	}
+	if maxChars < minChars+120 {
+		maxChars = minChars + 120
+	}
+	if maxChars > 380 {
+		maxChars = 380
+	}
+	return minChars, maxChars
 }
 
 type tailBuffer struct {

@@ -38,6 +38,24 @@ func TestLeadResponseFilterStripsSecVariant(t *testing.T) {
 	}
 }
 
+func TestLeadResponseFilterStripsNeedSecondToThinkVariant(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("I need a second to think. We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
+func TestLeadResponseFilterStripsThinkThisThroughVariant(t *testing.T) {
+	f := newLeadResponseFilter()
+	got := f.Consume("Let me think this through. We can ship this today.")
+	want := "We can ship this today."
+	if got != want {
+		t.Fatalf("Consume() = %q, want %q", got, want)
+	}
+}
+
 func TestLeadResponseFilterStripsSplitFillerPrefix(t *testing.T) {
 	f := newLeadResponseFilter()
 	if got := f.Consume("Give me a sec"); got != "" {
@@ -77,6 +95,14 @@ func TestLeadResponseFilterFinalizeUsesFallbackWhenStreamSilent(t *testing.T) {
 func TestStripAssistantLeadFillerDoesNotStripSecondChance(t *testing.T) {
 	got := stripAssistantLeadFiller("Give me a second chance to explain.")
 	want := "Give me a second chance to explain."
+	if got != want {
+		t.Fatalf("stripAssistantLeadFiller() = %q, want %q", got, want)
+	}
+}
+
+func TestStripAssistantLeadFillerDoesNotStripSecondOpinion(t *testing.T) {
+	got := stripAssistantLeadFiller("I need a second opinion before we ship this.")
+	want := "I need a second opinion before we ship this."
 	if got != want {
 		t.Fatalf("stripAssistantLeadFiller() = %q, want %q", got, want)
 	}
