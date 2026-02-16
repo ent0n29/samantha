@@ -10,24 +10,27 @@ import (
 type MessageType string
 
 const (
-	TypeClientAudioChunk    MessageType = "client_audio_chunk"
-	TypeClientControl       MessageType = "client_control"
-	TypeSTTPartial          MessageType = "stt_partial"
-	TypeSTTCommitted        MessageType = "stt_committed"
-	TypeAssistantTextDelta  MessageType = "assistant_text_delta"
-	TypeAssistantAudio      MessageType = "assistant_audio_chunk"
-	TypeAssistantTurnEnd    MessageType = "assistant_turn_end"
-	TypeSystemEvent         MessageType = "system_event"
-	TypeErrorEvent          MessageType = "error_event"
-	TypeTaskCreated         MessageType = "task_created"
-	TypeTaskPlanDelta       MessageType = "task_plan_delta"
-	TypeTaskStepStarted     MessageType = "task_step_started"
-	TypeTaskStepLog         MessageType = "task_step_log"
-	TypeTaskStepCompleted   MessageType = "task_step_completed"
-	TypeTaskWaitingApproval MessageType = "task_waiting_approval"
-	TypeTaskCompleted       MessageType = "task_completed"
-	TypeTaskFailed          MessageType = "task_failed"
-	TypeTaskStatusSnapshot  MessageType = "task_status_snapshot"
+	TypeClientAudioChunk       MessageType = "client_audio_chunk"
+	TypeClientControl          MessageType = "client_control"
+	TypeSTTPartial             MessageType = "stt_partial"
+	TypeSTTCommitted           MessageType = "stt_committed"
+	TypeSemanticEndpointHint   MessageType = "semantic_endpoint_hint"
+	TypeAssistantThinkingDelta MessageType = "assistant_thinking_delta"
+	TypeAssistantTextDelta     MessageType = "assistant_text_delta"
+	TypeAssistantAudio         MessageType = "assistant_audio_chunk"
+	TypeAssistantTurnEnd       MessageType = "assistant_turn_end"
+	TypeSystemEvent            MessageType = "system_event"
+	TypeErrorEvent             MessageType = "error_event"
+	TypeTaskCreated            MessageType = "task_created"
+	TypeTaskPlanGraph          MessageType = "task_plan_graph"
+	TypeTaskPlanDelta          MessageType = "task_plan_delta"
+	TypeTaskStepStarted        MessageType = "task_step_started"
+	TypeTaskStepLog            MessageType = "task_step_log"
+	TypeTaskStepCompleted      MessageType = "task_step_completed"
+	TypeTaskWaitingApproval    MessageType = "task_waiting_approval"
+	TypeTaskCompleted          MessageType = "task_completed"
+	TypeTaskFailed             MessageType = "task_failed"
+	TypeTaskStatusSnapshot     MessageType = "task_status_snapshot"
 )
 
 var ErrUnsupportedType = errors.New("unsupported message type")
@@ -52,6 +55,7 @@ type ClientControl struct {
 	TaskID    string      `json:"task_id,omitempty"`
 	Approved  *bool       `json:"approved,omitempty"`
 	Scope     string      `json:"scope,omitempty"`
+	Reason    string      `json:"reason,omitempty"`
 	TSMs      int64       `json:"ts_ms,omitempty"`
 }
 
@@ -68,6 +72,23 @@ type STTCommitted struct {
 	SessionID string      `json:"session_id"`
 	Text      string      `json:"text"`
 	TSMs      int64       `json:"ts_ms"`
+}
+
+type SemanticEndpointHint struct {
+	Type         MessageType `json:"type"`
+	SessionID    string      `json:"session_id"`
+	Reason       string      `json:"reason"`
+	Confidence   float64     `json:"confidence"`
+	HoldMS       int64       `json:"hold_ms"`
+	ShouldCommit bool        `json:"should_commit"`
+	TSMs         int64       `json:"ts_ms"`
+}
+
+type AssistantThinkingDelta struct {
+	Type      MessageType `json:"type"`
+	SessionID string      `json:"session_id"`
+	TurnID    string      `json:"turn_id"`
+	TextDelta string      `json:"text_delta"`
 }
 
 type AssistantTextDelta struct {
@@ -117,6 +138,32 @@ type TaskCreated struct {
 	Status           string      `json:"status"`
 	RiskLevel        string      `json:"risk_level,omitempty"`
 	RequiresApproval bool        `json:"requires_approval,omitempty"`
+}
+
+type TaskPlanGraphNode struct {
+	ID               string `json:"id"`
+	Seq              int    `json:"seq"`
+	Title            string `json:"title"`
+	Kind             string `json:"kind,omitempty"`
+	Status           string `json:"status,omitempty"`
+	RiskLevel        string `json:"risk_level,omitempty"`
+	RequiresApproval bool   `json:"requires_approval,omitempty"`
+}
+
+type TaskPlanGraphEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind,omitempty"`
+}
+
+type TaskPlanGraph struct {
+	Type      MessageType         `json:"type"`
+	SessionID string              `json:"session_id"`
+	TaskID    string              `json:"task_id"`
+	Status    string              `json:"status,omitempty"`
+	Detail    string              `json:"detail,omitempty"`
+	Nodes     []TaskPlanGraphNode `json:"nodes,omitempty"`
+	Edges     []TaskPlanGraphEdge `json:"edges,omitempty"`
 }
 
 type TaskPlanDelta struct {
@@ -209,6 +256,7 @@ type clientInbound struct {
 	TaskID      string      `json:"task_id"`
 	Approved    *bool       `json:"approved"`
 	Scope       string      `json:"scope"`
+	Reason      string      `json:"reason"`
 }
 
 func ParseClientMessage(raw []byte) (any, error) {
@@ -241,6 +289,7 @@ func ParseClientMessage(raw []byte) (any, error) {
 			TaskID:    inbound.TaskID,
 			Approved:  inbound.Approved,
 			Scope:     inbound.Scope,
+			Reason:    inbound.Reason,
 			TSMs:      inbound.TSMs,
 		}, nil
 	default:

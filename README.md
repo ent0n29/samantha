@@ -114,8 +114,15 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 - `APP_UI_SILENCE_BREAKER_MODE=off|visual|speech` (dead-air behavior while waiting)
 - `APP_UI_SILENCE_BREAKER_DELAY` (delay before silence-breaker triggers after `assistant_working`)
 - `APP_UI_VAD_PROFILE=default|patient|snappy` (`patient` waits longest; `snappy` responds sooner)
+- `APP_UI_VAD_MIN_UTTERANCE` (minimum utterance before client auto-commit can fire)
+- `APP_UI_VAD_GRACE` (extra silence grace before client auto-commit)
+- `APP_UI_AUDIO_SEGMENT_OVERLAP` (crossfade overlap between streamed playback segments)
+- `APP_FILLER_MODE=off|adaptive|occasional|always` (waiting backchannel policy; `adaptive` is default)
+- `APP_FILLER_MIN_DELAY`, `APP_FILLER_COOLDOWN`, `APP_FILLER_MAX_PER_TURN` (anti-spam filler controls)
 - `APP_UI_TASK_DESK_DEFAULT` (keep Task Desk hidden by default in core `/ui/`)
 - `APP_TASK_RUNTIME_ENABLED`, `APP_TASK_TIMEOUT`, `APP_TASK_IDEMPOTENCY_WINDOW` (voice-to-task runtime)
+- `APP_LOCAL_STT_PROFILE=fast|balanced|accurate` (local STT quality/speed preset)
+- `APP_LOCAL_STT_AUTO_MODEL_DOWNLOAD` (auto-fetch missing whisper model for selected preset)
 - `OPENCLAW_ADAPTER_MODE=auto|cli|http|mock`
 - `OPENCLAW_HTTP_URL` (when using `http`)
 - `OPENCLAW_HTTP_STREAM_STRICT` (strict streamed JSON validation for OpenClaw HTTP adapter)
@@ -132,6 +139,7 @@ Copy `.env.example` to `.env` and tweak as needed. Key vars:
 
 - Local (offline, default): whisper.cpp STT + Kokoro TTS (`VOICE_PROVIDER=local`)
   - First run: `make setup-local-voice`
+  - Presets: `APP_LOCAL_STT_PROFILE=fast|balanced|accurate` (`balanced` default)
   - If transcripts are still too rough, increase `LOCAL_WHISPER_BEAM_SIZE`/`LOCAL_WHISPER_BEST_OF` or switch to a larger local model.
 - ElevenLabs (optional): set `VOICE_PROVIDER=elevenlabs` + `ELEVENLABS_API_KEY`
   - If you want automatic fallback to local when ElevenLabs fails, use `VOICE_PROVIDER=auto`.
@@ -160,4 +168,4 @@ If `openclaw` is not installed/configured, the server runs with a mock brain.
   - optionally enforce provider check: `REQUIRE_LOCAL_PROVIDER=1 ...`
   - default guardrails: `REQUIRE_SAMPLES=1`, `MIN_STAGE_SAMPLES=5`, `REQUIRE_MIN_STAGE_SAMPLES=1`, `FAIL_EARLY=0`, `RESET_WINDOW=1`
   - speak through a few full turns while it runs (so stages move past warming)
-  - default targets: `first_text p95<=550ms`, `first_audio p95<=1400ms`, `turn_total p95<=3200ms`
+  - default targets: `assistant_working p95<=650ms`, `first_text p95<=550ms`, `first_audio p95<=1400ms`, `turn_total p95<=3200ms`

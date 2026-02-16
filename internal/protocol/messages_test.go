@@ -29,7 +29,7 @@ func TestParseClientMessageRejectsUnknownType(t *testing.T) {
 }
 
 func TestParseClientMessageControl(t *testing.T) {
-	raw := []byte(`{"type":"client_control","session_id":"s1","action":"stop","ts_ms":456}`)
+	raw := []byte(`{"type":"client_control","session_id":"s1","action":"stop","reason":"silence_release","ts_ms":456}`)
 	msg, err := ParseClientMessage(raw)
 	if err != nil {
 		t.Fatalf("ParseClientMessage() error = %v", err)
@@ -44,6 +44,9 @@ func TestParseClientMessageControl(t *testing.T) {
 	}
 	if control.TSMs != 456 {
 		t.Fatalf("TSMs = %d, want %d", control.TSMs, 456)
+	}
+	if control.Reason != "silence_release" {
+		t.Fatalf("Reason = %q, want %q", control.Reason, "silence_release")
 	}
 }
 

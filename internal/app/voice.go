@@ -48,16 +48,18 @@ func resolveVoiceProviders(cfg config.Config) (voiceSetup, error) {
 
 	tryLocal := func(fatal bool) (voiceSetup, bool, error) {
 		p, err := voice.NewLocalProvider(voice.LocalConfig{
-			WhisperCLI:         cfg.LocalWhisperCLI,
-			WhisperModelPath:   cfg.LocalWhisperModelPath,
-			WhisperLanguage:    cfg.LocalWhisperLanguage,
-			WhisperThreads:     cfg.LocalWhisperThreads,
-			WhisperBeamSize:    cfg.LocalWhisperBeamSize,
-			WhisperBestOf:      cfg.LocalWhisperBestOf,
-			KokoroPython:       cfg.LocalKokoroPython,
-			KokoroWorkerScript: cfg.LocalKokoroWorkerScript,
-			KokoroVoice:        cfg.LocalKokoroVoice,
-			KokoroLangCode:     cfg.LocalKokoroLangCode,
+			WhisperCLI:             cfg.LocalWhisperCLI,
+			WhisperModelPath:       cfg.LocalWhisperModelPath,
+			WhisperLanguage:        cfg.LocalWhisperLanguage,
+			WhisperThreads:         cfg.LocalWhisperThreads,
+			WhisperBeamSize:        cfg.LocalWhisperBeamSize,
+			WhisperBestOf:          cfg.LocalWhisperBestOf,
+			STTProfile:             cfg.LocalSTTProfile,
+			STTAutoDownloadMissing: cfg.LocalSTTAutoDownload,
+			KokoroPython:           cfg.LocalKokoroPython,
+			KokoroWorkerScript:     cfg.LocalKokoroWorkerScript,
+			KokoroVoice:            cfg.LocalKokoroVoice,
+			KokoroLangCode:         cfg.LocalKokoroLangCode,
 		})
 		if err != nil {
 			if fatal {

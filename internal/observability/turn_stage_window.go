@@ -3,6 +3,7 @@ package observability
 import (
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,16 +19,23 @@ type TurnStageStats struct {
 	TargetP95MS float64 `json:"target_p95_ms,omitempty"`
 }
 
+type TurnIndicator struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
 type TurnStageSnapshot struct {
 	GeneratedAt time.Time        `json:"generated_at"`
 	WindowSize  int              `json:"window_size"`
 	Stages      []TurnStageStats `json:"stages"`
+	Indicators  []TurnIndicator  `json:"indicators,omitempty"`
 }
 
 type turnStageWindow struct {
 	mu         sync.RWMutex
 	maxSamples int
 	stages     map[string]*turnStageBuffer
+	indicators map[string]int
 }
 
 type turnStageBuffer struct {
@@ -44,6 +52,7 @@ func newTurnStageWindow(maxSamples int) *turnStageWindow {
 	return &turnStageWindow{
 		maxSamples: maxSamples,
 		stages:     make(map[string]*turnStageBuffer),
+		indicators: make(map[string]int),
 	}
 }
 
@@ -114,11 +123,42 @@ func (w *turnStageWindow) Snapshot() TurnStageSnapshot {
 		})
 	}
 
+	indicators := make([]TurnIndicator, 0, len(w.indicators))
+	indicatorKeys := make([]string, 0, len(w.indicators))
+	for name := range w.indicators {
+		indicatorKeys = append(indicatorKeys, name)
+	}
+	sort.Strings(indicatorKeys)
+	for _, name := range indicatorKeys {
+		count := w.indicators[name]
+		if count <= 0 {
+			continue
+		}
+		indicators = append(indicators, TurnIndicator{
+			Name:  name,
+			Count: count,
+		})
+	}
+
 	return TurnStageSnapshot{
 		GeneratedAt: time.Now().UTC(),
 		WindowSize:  w.maxSamples,
 		Stages:      stages,
+		Indicators:  indicators,
 	}
+}
+
+func (w *turnStageWindow) ObserveIndicator(name string) {
+	if w == nil {
+		return
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.indicators[name]++
 }
 
 func (w *turnStageWindow) Reset() {
@@ -128,6 +168,7 @@ func (w *turnStageWindow) Reset() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.stages = make(map[string]*turnStageBuffer)
+	w.indicators = make(map[string]int)
 }
 
 func quantile(sorted []float64, q float64) float64 {
@@ -160,12 +201,16 @@ func stageTargetP95MS(stage string) float64 {
 		return 250
 	case "commit_to_context_ready":
 		return 350
-	case "commit_to_first_text":
-		return 400
-	case "commit_to_first_audio":
+	case "commit_to_assistant_working":
+		return 650
+	case "commit_to_thinking_delta":
 		return 900
+	case "commit_to_first_text":
+		return 550
+	case "commit_to_first_audio":
+		return 1400
 	case "turn_total":
-		return 3500
+		return 3200
 	default:
 		return 0
 	}

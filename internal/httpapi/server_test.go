@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,14 @@ func TestUISettings(t *testing.T) {
 		UITaskDeskDefault:        false,
 		UISilenceBreakerMode:     "visual",
 		UISilenceBreakerDelay:    900 * time.Millisecond,
+		UIVADMinUtterance:        780 * time.Millisecond,
+		UIVADGrace:               260 * time.Millisecond,
+		UIAudioSegmentOverlap:    30 * time.Millisecond,
+		LocalSTTProfile:          "balanced",
+		UIFillerMode:             "occasional",
+		UIFillerMinDelay:         1400 * time.Millisecond,
+		UIFillerCooldown:         12 * time.Second,
+		UIFillerMaxPerTurn:       2,
 		TaskRuntimeEnabled:       true,
 		TaskTimeout:              5 * time.Minute,
 		TaskIdempotencyWindow:    10 * time.Second,
@@ -175,6 +184,30 @@ func TestUISettings(t *testing.T) {
 	if payload["silence_breaker_delay_ms"] != float64(900) {
 		t.Fatalf("silence_breaker_delay_ms = %v, want 900", payload["silence_breaker_delay_ms"])
 	}
+	if payload["vad_min_utterance_ms"] != float64(780) {
+		t.Fatalf("vad_min_utterance_ms = %v, want 780", payload["vad_min_utterance_ms"])
+	}
+	if payload["vad_grace_ms"] != float64(260) {
+		t.Fatalf("vad_grace_ms = %v, want 260", payload["vad_grace_ms"])
+	}
+	if payload["audio_overlap_ms"] != float64(30) {
+		t.Fatalf("audio_overlap_ms = %v, want 30", payload["audio_overlap_ms"])
+	}
+	if payload["local_stt_profile"] != "balanced" {
+		t.Fatalf("local_stt_profile = %v, want balanced", payload["local_stt_profile"])
+	}
+	if payload["filler_mode"] != "occasional" {
+		t.Fatalf("filler_mode = %v, want occasional", payload["filler_mode"])
+	}
+	if payload["filler_min_delay_ms"] != float64(1400) {
+		t.Fatalf("filler_min_delay_ms = %v, want 1400", payload["filler_min_delay_ms"])
+	}
+	if payload["filler_cooldown_ms"] != float64(12000) {
+		t.Fatalf("filler_cooldown_ms = %v, want 12000", payload["filler_cooldown_ms"])
+	}
+	if payload["filler_max_per_turn"] != float64(2) {
+		t.Fatalf("filler_max_per_turn = %v, want 2", payload["filler_max_per_turn"])
+	}
 }
 
 func TestPerfLatencySnapshot(t *testing.T) {
@@ -186,6 +219,8 @@ func TestPerfLatencySnapshot(t *testing.T) {
 	metrics.ObserveTurnStage("commit_to_first_text", 320*time.Millisecond)
 	metrics.ObserveTurnStage("commit_to_first_text", 410*time.Millisecond)
 	metrics.ObserveTurnStage("commit_to_first_audio", 780*time.Millisecond)
+	metrics.ObserveTurnIndicator("assistant_working")
+	metrics.ObserveTurnIndicator("assistant_working")
 
 	srv := New(cfg, sessions, nil, metrics, nil)
 	router := srv.Router()
@@ -224,6 +259,30 @@ func TestPerfLatencySnapshot(t *testing.T) {
 	if !found {
 		t.Fatalf("missing commit_to_first_text stage in %+v", stagesAny)
 	}
+	indicatorsAny, ok := payload["indicators"].([]any)
+	if !ok {
+		t.Fatalf("indicators = %T (%v), want array", payload["indicators"], payload["indicators"])
+	}
+	indicatorFound := false
+	for _, item := range indicatorsAny {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if m["name"] == "assistant_working" {
+			indicatorFound = true
+			count, ok := m["count"].(float64)
+			if !ok {
+				t.Fatalf("assistant_working count type = %T, want number", m["count"])
+			}
+			if int(count) != 2 {
+				t.Fatalf("assistant_working count = %v, want 2", m["count"])
+			}
+		}
+	}
+	if !indicatorFound {
+		t.Fatalf("missing assistant_working indicator in %+v", indicatorsAny)
+	}
 }
 
 func TestPerfLatencyReset(t *testing.T) {
@@ -234,6 +293,7 @@ func TestPerfLatencyReset(t *testing.T) {
 	metrics := observability.NewMetrics("test_httpapi_perf_reset_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
 	metrics.ObserveTurnStage("commit_to_first_text", 320*time.Millisecond)
 	metrics.ObserveTurnStage("commit_to_first_audio", 780*time.Millisecond)
+	metrics.ObserveTurnIndicator("assistant_working")
 
 	srv := New(cfg, sessions, nil, metrics, nil)
 	router := srv.Router()
@@ -267,6 +327,10 @@ func TestPerfLatencyReset(t *testing.T) {
 	afterStages, _ := afterPayload["stages"].([]any)
 	if len(afterStages) != 0 {
 		t.Fatalf("after stages len = %d, want 0", len(afterStages))
+	}
+	afterIndicators, _ := afterPayload["indicators"].([]any)
+	if len(afterIndicators) != 0 {
+		t.Fatalf("after indicators len = %d, want 0", len(afterIndicators))
 	}
 }
 
@@ -408,6 +472,122 @@ func TestTaskEndpointsCreateApproveAndGet(t *testing.T) {
 	if listRes.Code != http.StatusOK {
 		t.Fatalf("list status = %d, want %d body=%s", listRes.Code, http.StatusOK, listRes.Body.String())
 	}
+}
+
+func TestTaskEndpointsPauseResume(t *testing.T) {
+	cfg := config.Config{
+		SessionInactivityTimeout: 2 * time.Minute,
+		TaskRuntimeEnabled:       true,
+		TaskTimeout:              5 * time.Minute,
+		TaskIdempotencyWindow:    10 * time.Second,
+	}
+	sessions := session.NewManager(cfg.SessionInactivityTimeout)
+	metrics := observability.NewMetrics("test_httpapi_tasks_pause_resume_" + time.Now().Format("150405") + "_" + time.Now().Format("000000000"))
+	taskService := taskruntime.New(taskruntime.Config{
+		Enabled:           true,
+		TaskTimeout:       cfg.TaskTimeout,
+		IdempotencyWindow: cfg.TaskIdempotencyWindow,
+	}, blockingHTTPTestAdapter{}, metrics)
+	defer func() { _ = taskService.Close() }()
+
+	srv := New(cfg, sessions, nil, metrics, taskService)
+	router := srv.Router()
+
+	createSessionReq := map[string]any{
+		"user_id":    "u-task-pr",
+		"persona_id": "warm",
+	}
+	createSessionBody, _ := json.Marshal(createSessionReq)
+	sessionRes := doRequest(t, router, http.MethodPost, "/v1/voice/session", "application/json", createSessionBody)
+	if sessionRes.Code != http.StatusCreated {
+		t.Fatalf("session create status = %d, want %d body=%s", sessionRes.Code, http.StatusCreated, sessionRes.Body.String())
+	}
+	var sessionPayload map[string]any
+	if err := json.Unmarshal(sessionRes.Body.Bytes(), &sessionPayload); err != nil {
+		t.Fatalf("decode session create: %v", err)
+	}
+	sessionID, _ := sessionPayload["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("missing session id in payload: %+v", sessionPayload)
+	}
+
+	createReq := map[string]any{
+		"session_id":  sessionID,
+		"user_id":     "u-task-pr",
+		"intent_text": "capture notes for this session",
+	}
+	createBody, _ := json.Marshal(createReq)
+	createRes := doRequest(t, router, http.MethodPost, "/v1/tasks", "application/json", createBody)
+	if createRes.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d body=%s", createRes.Code, http.StatusCreated, createRes.Body.String())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(createRes.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	taskID, _ := created["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("missing task_id in create response: %+v", created)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		getRes := doRequest(t, router, http.MethodGet, "/v1/tasks/"+taskID, "", nil)
+		if getRes.Code != http.StatusOK {
+			t.Fatalf("get status = %d, want %d body=%s", getRes.Code, http.StatusOK, getRes.Body.String())
+		}
+		var taskPayload map[string]any
+		if err := json.Unmarshal(getRes.Body.Bytes(), &taskPayload); err != nil {
+			t.Fatalf("decode task payload: %v", err)
+		}
+		if taskPayload["status"] == "running" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	pauseReq := map[string]any{"reason": "paused in test"}
+	pauseBody, _ := json.Marshal(pauseReq)
+	pauseRes := doRequest(t, router, http.MethodPost, "/v1/tasks/"+taskID+"/pause", "application/json", pauseBody)
+	if pauseRes.Code != http.StatusOK {
+		t.Fatalf("pause status = %d, want %d body=%s", pauseRes.Code, http.StatusOK, pauseRes.Body.String())
+	}
+	var paused map[string]any
+	if err := json.Unmarshal(pauseRes.Body.Bytes(), &paused); err != nil {
+		t.Fatalf("decode paused payload: %v", err)
+	}
+	if paused["status"] != "paused" {
+		t.Fatalf("paused status = %v, want paused", paused["status"])
+	}
+
+	resumeRes := doRequest(t, router, http.MethodPost, "/v1/tasks/"+taskID+"/resume", "application/json", nil)
+	if resumeRes.Code != http.StatusOK {
+		t.Fatalf("resume status = %d, want %d body=%s", resumeRes.Code, http.StatusOK, resumeRes.Body.String())
+	}
+	var resumed map[string]any
+	if err := json.Unmarshal(resumeRes.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("decode resumed payload: %v", err)
+	}
+	if resumed["status"] != "running" {
+		t.Fatalf("resumed status = %v, want running", resumed["status"])
+	}
+
+	cancelReq := map[string]any{"reason": "cleanup"}
+	cancelBody, _ := json.Marshal(cancelReq)
+	cancelRes := doRequest(t, router, http.MethodPost, "/v1/tasks/"+taskID+"/cancel", "application/json", cancelBody)
+	if cancelRes.Code != http.StatusOK {
+		t.Fatalf("cancel status = %d, want %d body=%s", cancelRes.Code, http.StatusOK, cancelRes.Body.String())
+	}
+}
+
+type blockingHTTPTestAdapter struct{}
+
+func (blockingHTTPTestAdapter) StreamResponse(ctx context.Context, _ openclaw.MessageRequest, onDelta openclaw.DeltaHandler) (openclaw.MessageResponse, error) {
+	if onDelta != nil {
+		_ = onDelta("running")
+	}
+	<-ctx.Done()
+	return openclaw.MessageResponse{}, ctx.Err()
 }
 
 func doRequest(t *testing.T, handler http.Handler, method, path, contentType string, body []byte) *httptest.ResponseRecorder {

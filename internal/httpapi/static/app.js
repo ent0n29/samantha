@@ -28,8 +28,23 @@ const VAD_MAX_CREST = 25; // peak/rms. Very high tends to be impulse noise (keyb
 const VAD_ATTACK_FRAMES = 3; // ~190-260ms depending capture frame size; prevents click triggers.
 const VAD_SHORT_UTTERANCE_MS = 1500;
 const VAD_AUTO_COMMIT_COOLDOWN_MS = 700;
-const VAD_AUTO_COMMIT_MIN_UTTERANCE_MS = 650;
-const VAD_AUTO_COMMIT_GRACE_MS = 220;
+const VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_DEFAULT = 650;
+const VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_MIN = 0;
+const VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_MAX = 4000;
+const VAD_AUTO_COMMIT_GRACE_MS_DEFAULT = 220;
+const VAD_AUTO_COMMIT_GRACE_MS_MIN = 0;
+const VAD_AUTO_COMMIT_GRACE_MS_MAX = 2000;
+const VAD_LONG_UTTERANCE_MS = 3200;
+const VAD_SHORT_COMMAND_MS = 900;
+const VAD_CONTINUATION_EXTRA_RELEASE_FRAMES = 2;
+const VAD_LONG_UTTERANCE_EXTRA_RELEASE_FRAMES = 2;
+const VAD_SHORT_COMMAND_RELEASE_DELTA = -1;
+const VAD_CONTINUATION_EXTRA_GRACE_MS = 120;
+const VAD_SEMANTIC_HINT_STALE_MS = 2400;
+const VAD_SEMANTIC_HOLD_MS_MAX = 900;
+const VAD_SEMANTIC_HOLD_MS_MIN = 0;
+const VAD_SEMANTIC_RELEASE_FRAME_MS = 140;
+const VAD_SEMANTIC_COMMIT_RELEASE_DELTA = -2;
 const VAD_PROFILE_DEFAULT = "default";
 const VAD_TUNING_DEFAULT = {
   releaseFrames: 9,
@@ -49,7 +64,9 @@ const VAD_TUNING_SNAPPY = {
   autoCommitSilenceMs: 280,
   autoCommitSilenceShortMs: 200,
 };
-const AUDIO_SEGMENT_OVERLAP_SEC = 0.022;
+const AUDIO_SEGMENT_OVERLAP_MS_DEFAULT = 22;
+const AUDIO_SEGMENT_OVERLAP_MS_MIN = 0;
+const AUDIO_SEGMENT_OVERLAP_MS_MAX = 150;
 const PLAYBACK_PREWARM_COOLDOWN_MS = 45_000;
 const PLAYBACK_PREWARM_DURATION_SEC = 0.03;
 const UI_SILENCE_BREAKER_MODE_DEFAULT = "visual";
@@ -62,6 +79,23 @@ const THINKING_CUE_GAIN = 0.045;
 const THINKING_CUE_FREQ_START_HZ = 690;
 const THINKING_CUE_FREQ_END_HZ = 560;
 const HANDSFREE_AWAKE_WINDOW_MS = 30_000;
+const FILLER_MODE_DEFAULT = "adaptive";
+const FILLER_MODE_ALLOWED = new Set(["off", "adaptive", "occasional", "always"]);
+const FILLER_MIN_DELAY_MS_DEFAULT = 1200;
+const FILLER_MIN_DELAY_MS_MIN = 0;
+const FILLER_MIN_DELAY_MS_MAX = 60_000;
+const FILLER_COOLDOWN_MS_DEFAULT = 18_000;
+const FILLER_COOLDOWN_MS_MIN = 0;
+const FILLER_COOLDOWN_MS_MAX = 180_000;
+const FILLER_MAX_PER_TURN_DEFAULT = 1;
+const FILLER_MAX_PER_TURN_MIN = 0;
+const FILLER_MAX_PER_TURN_MAX = 10;
+const FILLER_PHRASES = [
+  "Let me think for a moment.",
+  "I’m on it.",
+  "Thinking through that now.",
+  "Got it, working on it.",
+];
 
 const state = {
   sessionId: "",
@@ -105,8 +139,13 @@ const state = {
   captionClearTimer: null,
   silenceBreakerTimer: null,
   thinkingCueTimer: null,
+  fillerTimer: null,
   lastThinkingCueAtMs: 0,
   awaitingAssistantResponse: false,
+  lastCommitAtMs: 0,
+  lastFillerAtMs: 0,
+  fillerCountForTurn: 0,
+  lastFillerPhrase: "",
 
   longPressTimer: null,
   longPressFired: false,
@@ -140,6 +179,15 @@ const state = {
   vadPreroll: [],
   vadPrerollBytes: 0,
   vadTuning: VAD_TUNING_DEFAULT,
+  lastPartialText: "",
+  utteranceHadContinuationHold: false,
+  semanticHint: {
+    reason: "",
+    confidence: 0,
+    holdMs: 0,
+    shouldCommit: false,
+    atMs: 0,
+  },
 
   vizCtx: null,
   vizCSSW: 0,
@@ -162,6 +210,14 @@ const state = {
     silenceBreakerDelayMs: UI_SILENCE_BREAKER_DELAY_MS_DEFAULT,
     taskDeskDefault: false,
     vadProfile: VAD_PROFILE_DEFAULT,
+    vadMinUtteranceMs: VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_DEFAULT,
+    vadGraceMs: VAD_AUTO_COMMIT_GRACE_MS_DEFAULT,
+    audioOverlapMs: AUDIO_SEGMENT_OVERLAP_MS_DEFAULT,
+    localSttProfile: "balanced",
+    fillerMode: FILLER_MODE_DEFAULT,
+    fillerMinDelayMs: FILLER_MIN_DELAY_MS_DEFAULT,
+    fillerCooldownMs: FILLER_COOLDOWN_MS_DEFAULT,
+    fillerMaxPerTurn: FILLER_MAX_PER_TURN_DEFAULT,
   },
 
   taskDesk: {
@@ -311,6 +367,62 @@ function normalizeVADProfile(raw) {
   return VAD_PROFILE_DEFAULT;
 }
 
+function normalizeVADMinUtteranceMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_DEFAULT;
+  }
+  return Math.min(VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_MAX, Math.max(VAD_AUTO_COMMIT_MIN_UTTERANCE_MS_MIN, Math.round(ms)));
+}
+
+function normalizeVADGraceMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return VAD_AUTO_COMMIT_GRACE_MS_DEFAULT;
+  }
+  return Math.min(VAD_AUTO_COMMIT_GRACE_MS_MAX, Math.max(VAD_AUTO_COMMIT_GRACE_MS_MIN, Math.round(ms)));
+}
+
+function normalizeAudioOverlapMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return AUDIO_SEGMENT_OVERLAP_MS_DEFAULT;
+  }
+  return Math.min(AUDIO_SEGMENT_OVERLAP_MS_MAX, Math.max(AUDIO_SEGMENT_OVERLAP_MS_MIN, Math.round(ms)));
+}
+
+function normalizeFillerMode(raw) {
+  const mode = String(raw || "").trim().toLowerCase();
+  if (FILLER_MODE_ALLOWED.has(mode)) {
+    return mode;
+  }
+  return FILLER_MODE_DEFAULT;
+}
+
+function normalizeFillerDelayMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return FILLER_MIN_DELAY_MS_DEFAULT;
+  }
+  return Math.min(FILLER_MIN_DELAY_MS_MAX, Math.max(FILLER_MIN_DELAY_MS_MIN, Math.round(ms)));
+}
+
+function normalizeFillerCooldownMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return FILLER_COOLDOWN_MS_DEFAULT;
+  }
+  return Math.min(FILLER_COOLDOWN_MS_MAX, Math.max(FILLER_COOLDOWN_MS_MIN, Math.round(ms)));
+}
+
+function normalizeFillerMaxPerTurn(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) {
+    return FILLER_MAX_PER_TURN_DEFAULT;
+  }
+  return Math.min(FILLER_MAX_PER_TURN_MAX, Math.max(FILLER_MAX_PER_TURN_MIN, Math.round(n)));
+}
+
 function applyVADTuning() {
   const profile = normalizeVADProfile(state.uiSettings.vadProfile);
   state.uiSettings.vadProfile = profile;
@@ -345,6 +457,33 @@ async function loadUISettings() {
     }
     if (Object.prototype.hasOwnProperty.call(payload, "vad_profile")) {
       state.uiSettings.vadProfile = normalizeVADProfile(payload.vad_profile);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "vad_min_utterance_ms")) {
+      state.uiSettings.vadMinUtteranceMs = normalizeVADMinUtteranceMs(payload.vad_min_utterance_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "vad_grace_ms")) {
+      state.uiSettings.vadGraceMs = normalizeVADGraceMs(payload.vad_grace_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "audio_overlap_ms")) {
+      state.uiSettings.audioOverlapMs = normalizeAudioOverlapMs(payload.audio_overlap_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "local_stt_profile")) {
+      const profile = String(payload.local_stt_profile || "").trim().toLowerCase();
+      if (profile === "fast" || profile === "balanced" || profile === "accurate") {
+        state.uiSettings.localSttProfile = profile;
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "filler_mode")) {
+      state.uiSettings.fillerMode = normalizeFillerMode(payload.filler_mode);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "filler_min_delay_ms")) {
+      state.uiSettings.fillerMinDelayMs = normalizeFillerDelayMs(payload.filler_min_delay_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "filler_cooldown_ms")) {
+      state.uiSettings.fillerCooldownMs = normalizeFillerCooldownMs(payload.filler_cooldown_ms);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, "filler_max_per_turn")) {
+      state.uiSettings.fillerMaxPerTurn = normalizeFillerMaxPerTurn(payload.filler_max_per_turn);
     }
     applyVADTuning();
     applySurfaceFlags();
@@ -510,7 +649,7 @@ function wireUI() {
     if (evt.key === "Escape") {
       evt.preventDefault();
       stopPlayback({ clearBuffered: true });
-      sendControl("interrupt");
+      sendControl("interrupt", { reason: "manual_interrupt" });
       setCaption("…", "Interrupting…", { clearAfterMs: 900 });
       return;
     }
@@ -1113,6 +1252,98 @@ function wirePointerParallax() {
   root.style.setProperty("--my", "40%");
 }
 
+function normalizePartialForEndpointing(raw) {
+  return String(raw || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function hasContinuationCue(partialText) {
+  const t = normalizePartialForEndpointing(partialText);
+  if (!t) {
+    return false;
+  }
+  if (/[,:;…-]$/.test(t)) {
+    return true;
+  }
+  if (/\b(and|but|because|so|then|which|that|if|when|while)\b\s*$/.test(t)) {
+    return true;
+  }
+  if (/\b(i mean|for example|for instance|in order to)\b\s*$/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+function hasStrongStopCue(partialText) {
+  const t = normalizePartialForEndpointing(partialText);
+  if (!t) {
+    return false;
+  }
+  if (/[.!?]["']?$/.test(t)) {
+    return true;
+  }
+  if (/\b(done|stop|thanks|thank you)\b$/.test(t)) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeSemanticHintHoldMs(raw) {
+  const ms = Number(raw);
+  if (!Number.isFinite(ms)) {
+    return 0;
+  }
+  return Math.min(VAD_SEMANTIC_HOLD_MS_MAX, Math.max(VAD_SEMANTIC_HOLD_MS_MIN, Math.round(ms)));
+}
+
+function activeSemanticHint() {
+  const hint = state.semanticHint;
+  if (!hint || !hint.atMs) {
+    return null;
+  }
+  if (Date.now() - hint.atMs > VAD_SEMANTIC_HINT_STALE_MS) {
+    return null;
+  }
+  return hint;
+}
+
+function resetSemanticHint() {
+  state.semanticHint.reason = "";
+  state.semanticHint.confidence = 0;
+  state.semanticHint.holdMs = 0;
+  state.semanticHint.shouldCommit = false;
+  state.semanticHint.atMs = 0;
+}
+
+function adaptiveReleaseFrames(baseRelease, utteranceMs, partialText) {
+  let release = Number(baseRelease) || 1;
+  let continuationHold = false;
+  if (hasContinuationCue(partialText)) {
+    release += VAD_CONTINUATION_EXTRA_RELEASE_FRAMES;
+    continuationHold = true;
+  }
+  if (utteranceMs > VAD_LONG_UTTERANCE_MS) {
+    release += VAD_LONG_UTTERANCE_EXTRA_RELEASE_FRAMES;
+  }
+  if (utteranceMs > 0 && utteranceMs < VAD_SHORT_COMMAND_MS && hasStrongStopCue(partialText)) {
+    release += VAD_SHORT_COMMAND_RELEASE_DELTA;
+  }
+  const semantic = activeSemanticHint();
+  if (semantic) {
+    const releaseDelta = Math.round(normalizeSemanticHintHoldMs(semantic.holdMs) / VAD_SEMANTIC_RELEASE_FRAME_MS);
+    release += releaseDelta;
+    if (semantic.shouldCommit) {
+      release += VAD_SEMANTIC_COMMIT_RELEASE_DELTA;
+    }
+  }
+  const minRelease = Math.max(1, Math.round((Number(baseRelease) || 1) - 1));
+  const maxRelease = Math.max(minRelease, Math.round((Number(baseRelease) || 1) + 5));
+  release = Math.max(minRelease, Math.min(maxRelease, Math.round(release)));
+  return { release, continuationHold };
+}
+
 function maybeAutoCommit() {
   if (!state.micActive || !state.connected) {
     return;
@@ -1129,14 +1360,25 @@ function maybeAutoCommit() {
   }
   const now = Date.now();
   const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
-  if (utteranceMs > 0 && utteranceMs < VAD_AUTO_COMMIT_MIN_UTTERANCE_MS) {
+  const minUtteranceMs = normalizeVADMinUtteranceMs(state.uiSettings?.vadMinUtteranceMs);
+  if (utteranceMs > 0 && utteranceMs < minUtteranceMs) {
     return;
   }
   const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
   let silenceTargetMs =
     utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.autoCommitSilenceShortMs : tuning.autoCommitSilenceMs;
   // Keep auto-commit as a conservative fallback; frame-based release is the primary trigger.
-  silenceTargetMs += VAD_AUTO_COMMIT_GRACE_MS;
+  silenceTargetMs += normalizeVADGraceMs(state.uiSettings?.vadGraceMs);
+  if (hasContinuationCue(state.lastPartialText)) {
+    silenceTargetMs += VAD_CONTINUATION_EXTRA_GRACE_MS;
+  }
+  const semantic = activeSemanticHint();
+  if (semantic) {
+    silenceTargetMs += normalizeSemanticHintHoldMs(semantic.holdMs);
+    if (semantic.shouldCommit) {
+      silenceTargetMs = Math.min(silenceTargetMs, 260);
+    }
+  }
   // Tune for "talk, then pause": commit after a short silence.
   const silenceMs = now - state.lastVoiceAtMs;
   if (silenceMs < silenceTargetMs) {
@@ -1153,8 +1395,10 @@ function maybeAutoCommit() {
   state.vadSpeechFrames = 0;
   state.vadSilenceFrames = 0;
   state.vadSpeechStartMs = 0;
+  state.utteranceHadContinuationHold = false;
+  resetSemanticHint();
   clearVADPreroll();
-  sendControl("stop");
+  sendControl("stop", { reason: "silence_fallback" });
 }
 
 async function ensureSessionConnected() {
@@ -1763,6 +2007,8 @@ function orderedPerfStages(snapshot) {
     "commit_to_tts_ready",
     "commit_to_context_ready",
     "commit_to_brain_first_delta",
+    "commit_to_assistant_working",
+    "commit_to_thinking_delta",
     "commit_to_first_text",
     "brain_first_delta_to_first_audio",
     "commit_to_first_audio",
@@ -1794,6 +2040,10 @@ function displayStageName(stage) {
       return "commit->context-ready";
     case "commit_to_brain_first_delta":
       return "commit->brain-first-delta";
+    case "commit_to_assistant_working":
+      return "commit->assistant-working";
+    case "commit_to_thinking_delta":
+      return "commit->thinking-delta";
     case "commit_to_first_text":
       return "commit->first-text";
     case "brain_first_delta_to_first_audio":
@@ -1813,6 +2063,14 @@ function fmtMS(n) {
     return "n/a";
   }
   return `${Math.round(v)}ms`;
+}
+
+function playbackOverlapSec() {
+  const ms = normalizeAudioOverlapMs(state.uiSettings?.audioOverlapMs);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return 0;
+  }
+  return ms / 1000;
 }
 
 function renderPerfLatency() {
@@ -1866,6 +2124,25 @@ function renderPerfLatency() {
     root.appendChild(card);
   }
 
+  const indicators = Array.isArray(snapshot.indicators) ? snapshot.indicators : [];
+  if (indicators.length > 0) {
+    const summary = [];
+    for (const raw of indicators) {
+      const name = String(raw?.name || "").trim();
+      const count = Number(raw?.count);
+      if (!name || !Number.isFinite(count) || count <= 0) {
+        continue;
+      }
+      summary.push(`${name}=${Math.round(count)}`);
+    }
+    if (summary.length > 0) {
+      const row = document.createElement("div");
+      row.className = "perf-card";
+      row.textContent = `indicators ${summary.join("  ")}`;
+      root.appendChild(row);
+    }
+  }
+
   if (state.perfUpdatedAtMs > 0) {
     const agoSec = Math.max(0, Math.round((Date.now() - state.perfUpdatedAtMs) / 100) / 10);
     el.perfUpdated.textContent = `${agoSec}s ago`;
@@ -1894,6 +2171,7 @@ function sendControl(action, opts = {}) {
   const taskID = typeof opts.taskID === "string" ? opts.taskID.trim() : "";
   const approved = typeof opts.approved === "boolean" ? opts.approved : undefined;
   const scope = typeof opts.scope === "string" ? opts.scope.trim() : "";
+  const reason = typeof opts.reason === "string" ? opts.reason.trim().toLowerCase() : "";
   const payload = {
     type: "client_control",
     session_id: state.sessionId,
@@ -1910,6 +2188,9 @@ function sendControl(action, opts = {}) {
   }
   if (scope) {
     payload.scope = scope;
+  }
+  if (reason) {
+    payload.reason = reason;
   }
   const ok = sendJSON({
     ...payload,
@@ -2062,6 +2343,9 @@ function resetVAD() {
   state.vadSilenceFrames = 0;
   state.vadStreaming = false;
   state.vadSpeechStartMs = 0;
+  state.lastPartialText = "";
+  state.utteranceHadContinuationHold = false;
+  resetSemanticHint();
   clearVADPreroll();
   clearQueuedMicPCM();
 }
@@ -2300,7 +2584,7 @@ async function scheduleWavSegment(bytes, token) {
   let overlap = 0;
   const canOverlap = Number.isFinite(state.playbackNextTime) && state.playbackNextTime > baseStart;
   if (canOverlap) {
-    overlap = Math.min(AUDIO_SEGMENT_OVERLAP_SEC, buffer.duration * 0.18);
+    overlap = Math.min(playbackOverlapSec(), buffer.duration * 0.18);
   }
   if (!state.playbackNextTime || state.playbackNextTime < baseStart - 0.1) {
     state.playbackNextTime = baseStart;
@@ -2426,7 +2710,7 @@ async function schedulePCM16Segment(bytes, sampleRate, token) {
   let overlap = 0;
   const canOverlap = Number.isFinite(state.playbackNextTime) && state.playbackNextTime > baseStart;
   if (canOverlap) {
-    overlap = Math.min(AUDIO_SEGMENT_OVERLAP_SEC, buffer.duration * 0.18);
+    overlap = Math.min(playbackOverlapSec(), buffer.duration * 0.18);
   }
   if (!state.playbackNextTime || state.playbackNextTime < baseStart - 0.1) {
     state.playbackNextTime = baseStart;
@@ -2553,10 +2837,11 @@ function processMicFrame(input, inputSampleRate) {
         state.vadSpeechStartMs = now;
         state.sawSpeech = true;
         state.lastVoiceAtMs = now;
+        state.utteranceHadContinuationHold = false;
         clearVADPreroll();
 
         stopPlayback({ clearBuffered: true });
-        sendControl("interrupt");
+        sendControl("interrupt", { reason: "barge_interrupt" });
         setCaption("…", "Listening…", { clearAfterMs: 1200 });
         // Send the preroll immediately, then continue streaming live audio on the next frames.
         flushBargePreroll();
@@ -2588,6 +2873,7 @@ function processMicFrame(input, inputSampleRate) {
       state.vadSpeechStartMs = now;
       state.sawSpeech = true;
       state.lastVoiceAtMs = now;
+      state.utteranceHadContinuationHold = false;
       flushVADPreroll();
     }
     return;
@@ -2606,8 +2892,10 @@ function processMicFrame(input, inputSampleRate) {
 
   const utteranceMs = state.vadSpeechStartMs > 0 ? now - state.vadSpeechStartMs : 0;
   const tuning = state.vadTuning || VAD_TUNING_SNAPPY;
-  const releaseFrames = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.releaseFramesShort : tuning.releaseFrames;
-  if (!speechLike && state.vadSilenceFrames >= releaseFrames) {
+  const baseRelease = utteranceMs > 0 && utteranceMs < VAD_SHORT_UTTERANCE_MS ? tuning.releaseFramesShort : tuning.releaseFrames;
+  const endpoint = adaptiveReleaseFrames(baseRelease, utteranceMs, state.lastPartialText);
+  state.utteranceHadContinuationHold = endpoint.continuationHold;
+  if (!speechLike && state.vadSilenceFrames >= endpoint.release) {
     flushQueuedMicPCM(now, true);
     state.lastAutoCommitAtMs = now;
     state.sawSpeech = false;
@@ -2616,7 +2904,9 @@ function processMicFrame(input, inputSampleRate) {
     state.vadSilenceFrames = 0;
     state.vadSpeechStartMs = 0;
     clearVADPreroll();
-    sendControl("stop");
+    resetSemanticHint();
+    sendControl("stop", { reason: state.utteranceHadContinuationHold ? "continuation_hold" : "silence_release" });
+    state.utteranceHadContinuationHold = false;
   }
 }
 
@@ -2788,7 +3078,7 @@ async function stopMic({ sendStop }) {
   }
 
   if (shouldSendStop) {
-    sendControl("stop");
+    sendControl("stop", { reason: "manual_stop" });
   }
   logEvent("microphone stopped");
 }
@@ -2808,6 +3098,7 @@ function handleServerMessage(raw) {
       if (!isAwake()) {
         break;
       }
+      state.lastPartialText = String(msg.text || "");
       setPresence("listening", "I’m listening.", msg.text || "");
       break;
     case "stt_committed":
@@ -2826,13 +3117,24 @@ function handleServerMessage(raw) {
         state.awakeUntilMs = 0;
         state.manualArmUntilMs = 0;
       }
+      state.lastCommitAtMs = Date.now();
+      state.fillerCountForTurn = 0;
+      state.lastPartialText = "";
+      resetSemanticHint();
       state.awaitingAssistantResponse = true;
       clearSilenceBreakerTimer();
+      clearFillerTimer();
       setPresence("thinking", "", "");
       setCaption("", msg.text || "", { clearAfterMs: 1200 });
       break;
+    case "semantic_endpoint_hint":
+      handleSemanticEndpointHint(msg);
+      break;
     case "system_event":
       handleSystemEvent(msg);
+      break;
+    case "assistant_thinking_delta":
+      handleAssistantThinkingDelta(msg);
       break;
     case "assistant_text_delta":
       if (state.bargeInActive) {
@@ -2843,6 +3145,8 @@ function handleServerMessage(raw) {
       }
       state.awaitingAssistantResponse = false;
       clearSilenceBreakerTimer();
+      clearFillerTimer();
+      cancelSpokenFiller();
       setPresence("thinking", "", "");
       handleAssistantDelta(msg);
       break;
@@ -2856,6 +3160,8 @@ function handleServerMessage(raw) {
       }
       state.awaitingAssistantResponse = false;
       clearSilenceBreakerTimer();
+      clearFillerTimer();
+      cancelSpokenFiller();
       state.speakEnergyTarget = Math.max(state.speakEnergyTarget, 0.32);
       setPresence("speaking", "…", "");
       handleAssistantAudio(msg);
@@ -2867,6 +3173,7 @@ function handleServerMessage(raw) {
       handleTaskSnapshot(msg);
       break;
     case "task_created":
+    case "task_plan_graph":
     case "task_plan_delta":
     case "task_step_started":
     case "task_step_log":
@@ -2879,6 +3186,8 @@ function handleServerMessage(raw) {
     case "error_event":
       state.awaitingAssistantResponse = false;
       clearSilenceBreakerTimer();
+      clearFillerTimer();
+      cancelSpokenFiller();
       setPresence("error", "Something went wrong.", `${msg.code || "error"} (${msg.source || "gateway"})`);
       logError(`error_event ${msg.code || ""} ${msg.detail || ""}`.trim());
       break;
@@ -2886,6 +3195,48 @@ function handleServerMessage(raw) {
       logEvent(`event: ${t}`);
       break;
   }
+}
+
+function handleSemanticEndpointHint(msg) {
+  const reason = String(msg.reason || "").trim().toLowerCase();
+  const holdMs = normalizeSemanticHintHoldMs(msg.hold_ms);
+  const confidenceRaw = Number(msg.confidence);
+  const confidence = Number.isFinite(confidenceRaw) ? clamp(confidenceRaw, 0, 1) : 0;
+  const shouldCommit = Boolean(msg.should_commit);
+
+  state.semanticHint.reason = reason;
+  state.semanticHint.holdMs = holdMs;
+  state.semanticHint.confidence = confidence;
+  state.semanticHint.shouldCommit = shouldCommit;
+  state.semanticHint.atMs = Date.now();
+
+  if (!shouldCommit) {
+    return;
+  }
+  if (!state.connected || !state.micActive || !state.vadStreaming) {
+    return;
+  }
+  if (state.presence === "speaking" && !state.bargeInActive) {
+    return;
+  }
+  if (state.vadSilenceFrames < 1) {
+    return;
+  }
+  maybeAutoCommit();
+}
+
+function handleAssistantThinkingDelta(msg) {
+  if (state.bargeInActive || !state.connected) {
+    return;
+  }
+  const text = String(msg.text_delta || "").trim();
+  if (!text) {
+    return;
+  }
+  if (state.awaitingAssistantResponse) {
+    setPresence("thinking", "", "");
+  }
+  setCaption("", softTruncate(text, 160), { clearAfterMs: 1700 });
 }
 
 function handleSystemEvent(msg) {
@@ -2903,7 +3254,25 @@ function handleSystemEvent(msg) {
       }
       setPresence("thinking", "", "");
       scheduleSilenceBreaker();
+      scheduleThinkingFiller();
       logEvent("assistant working");
+      break;
+    case "assistant_first_text":
+      state.awaitingAssistantResponse = false;
+      clearSilenceBreakerTimer();
+      clearFillerTimer();
+      cancelSpokenFiller();
+      setPresence("thinking", "", "");
+      logEvent("assistant first text");
+      break;
+    case "assistant_first_audio":
+      state.awaitingAssistantResponse = false;
+      clearSilenceBreakerTimer();
+      clearFillerTimer();
+      cancelSpokenFiller();
+      state.speakEnergyTarget = Math.max(state.speakEnergyTarget, 0.32);
+      setPresence("speaking", "…", "");
+      logEvent("assistant first audio");
       break;
     default:
       logEvent(`system event: ${code || "unknown"}`);
@@ -2968,6 +3337,8 @@ function handleAssistantTurnEnd(msg) {
   const reason = msg.reason || "completed";
   state.awaitingAssistantResponse = false;
   clearSilenceBreakerTimer();
+  clearFillerTimer();
+  cancelSpokenFiller();
   const reasonNorm = String(reason || "").trim().toLowerCase();
   const aborted = reasonNorm === "interrupted" || reasonNorm === "barge_in" || reasonNorm === "connection_closed";
   if (aborted) {
@@ -3092,7 +3463,15 @@ function normalizeTaskStatus(status) {
   if (!s) {
     return "planned";
   }
-  if (s === "cancelled" || s === "failed" || s === "completed" || s === "running" || s === "awaiting_approval" || s === "planned") {
+  if (
+    s === "cancelled" ||
+    s === "failed" ||
+    s === "completed" ||
+    s === "running" ||
+    s === "paused" ||
+    s === "awaiting_approval" ||
+    s === "planned"
+  ) {
     return s;
   }
   return "planned";
@@ -3233,6 +3612,13 @@ function eventNoteFromMessage(msg) {
   switch (type) {
     case "task_created":
       return "Task created.";
+    case "task_plan_graph": {
+      const nodes = Array.isArray(msg?.nodes) ? msg.nodes.length : 0;
+      if (nodes > 0) {
+        return `Planned ${nodes} step${nodes === 1 ? "" : "s"}.`;
+      }
+      return String(msg?.detail || "").trim() || "Task graph planned.";
+    }
     case "task_plan_delta":
       return String(msg?.text_delta || "").trim() || "Task plan updated.";
     case "task_step_started":
@@ -3285,7 +3671,7 @@ function recomputeTaskDeskOrder() {
   const byUpdatedDesc = (a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0);
   td.orderedActive = all.filter((t) => t.status === "running").sort(byUpdatedDesc).map((t) => t.id);
   td.orderedAwaiting = all.filter((t) => t.status === "awaiting_approval").sort(byUpdatedDesc).map((t) => t.id);
-  td.orderedPlanned = all.filter((t) => t.status === "planned").sort(byUpdatedDesc).map((t) => t.id);
+  td.orderedPlanned = all.filter((t) => t.status === "planned" || t.status === "paused").sort(byUpdatedDesc).map((t) => t.id);
 }
 
 function taskSyncLabel() {
@@ -3389,6 +3775,28 @@ function renderTaskDeskGroup(root, ids, emptyText) {
       deny.setAttribute("data-task-action", "deny");
       deny.disabled = inFlight;
       actions.appendChild(deny);
+    }
+
+    if (task.status === "running") {
+      const pause = document.createElement("button");
+      pause.type = "button";
+      pause.className = "task-action";
+      pause.textContent = "Pause";
+      pause.setAttribute("data-task-id", task.id);
+      pause.setAttribute("data-task-action", "pause");
+      pause.disabled = inFlight;
+      actions.appendChild(pause);
+    }
+
+    if (task.status === "paused") {
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "task-action";
+      resume.textContent = "Resume";
+      resume.setAttribute("data-task-id", task.id);
+      resume.setAttribute("data-task-action", "resume");
+      resume.disabled = inFlight;
+      actions.appendChild(resume);
     }
 
     if (!isTaskTerminalStatus(task.status)) {
@@ -3631,6 +4039,36 @@ async function handleTaskDeskAction(taskID, action) {
       setCaption("Cancel sent.", "", { clearAfterMs: 1400 });
       return;
     }
+    if (op === "pause") {
+      const ok = sendControl("pause_task", { taskID: id });
+      if (!ok) {
+        const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}/pause`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ reason: "Paused from Task Desk." }),
+        });
+        if (!res.ok) {
+          throw new Error(`pause failed: HTTP ${res.status}`);
+        }
+      }
+      setCaption("Pause sent.", "", { clearAfterMs: 1400 });
+      await refreshTask(id, { delayMS: TASK_REFRESH_AFTER_CONTROL_MS });
+      return;
+    }
+    if (op === "resume") {
+      const ok = sendControl("resume_task", { taskID: id });
+      if (!ok) {
+        const res = await fetch(`/v1/tasks/${encodeURIComponent(id)}/resume`, {
+          method: "POST",
+        });
+        if (!res.ok) {
+          throw new Error(`resume failed: HTTP ${res.status}`);
+        }
+      }
+      setCaption("Resume sent.", "", { clearAfterMs: 1400 });
+      await refreshTask(id, { delayMS: TASK_REFRESH_AFTER_CONTROL_MS });
+      return;
+    }
   } catch (err) {
     const task = td.tasksById.get(id);
     if (task) {
@@ -3702,6 +4140,11 @@ function applyTaskEventPatch(msg, opts = {}) {
       patch.requiresApproval = Boolean(msg?.requires_approval);
       statusSet = true;
       break;
+    case "task_plan_graph":
+      patch.status = normalizeTaskStatus(msg?.status || "planned");
+      patch.note = String(msg?.detail || "").trim();
+      statusSet = true;
+      break;
     case "task_plan_delta":
       patch.status = normalizeTaskStatus(msg?.status || "planned");
       patch.note = String(msg?.text_delta || "").trim();
@@ -3766,6 +4209,13 @@ function applyTaskEventPatch(msg, opts = {}) {
         setCaption("Task created.", note || `Task ${taskID.slice(0, 8)}`, { clearAfterMs: 2200 });
         logEvent(`task created: ${taskID}`);
         break;
+      case "task_plan_graph":
+        setPresence("thinking", "Planning task…", "");
+        if (note) {
+          setCaption("Task graph planned.", softTruncate(note, 180), { clearAfterMs: 2200 });
+        }
+        logEvent(`task graph: ${taskID}`);
+        break;
       case "task_plan_delta":
         setPresence("thinking", "Planning task…", "");
         if (note) {
@@ -3793,14 +4243,20 @@ function applyTaskEventPatch(msg, opts = {}) {
         setCaption("Approval required.", softTruncate(note || "Say “approve task” or “deny task”.", 220), { clearAfterMs: 5200 });
         logEvent(`task waiting approval: ${taskID}`);
         break;
+      case "task_failed":
+        if (normalizeTaskStatus(msg?.status) === "paused") {
+          setPresence("connected", "Task paused.", "");
+          setCaption("Task paused.", softTruncate(note || "Say “resume task” when ready.", 220), { clearAfterMs: 3200 });
+          logEvent(`task paused: ${taskID}`);
+          break;
+        }
+        setPresence("error", "Task failed.", softTruncate(note, 220));
+        logError(`task failed: ${taskID} ${note}`.trim());
+        break;
       case "task_completed":
         setPresence("connected", "Task completed.", "");
         setCaption("Task completed.", softTruncate(note, 220), { clearAfterMs: 3800 });
         logEvent(`task completed: ${taskID}`);
-        break;
-      case "task_failed":
-        setPresence("error", "Task failed.", softTruncate(note, 220));
-        logError(`task failed: ${taskID} ${note}`.trim());
         break;
       default:
         logEvent(`task event: ${type}`);
@@ -3965,6 +4421,8 @@ function setPresence(mode, primary, secondary) {
   if (normalized !== "thinking") {
     clearSilenceBreakerTimer();
     clearThinkingCueTimer();
+    clearFillerTimer();
+    cancelSpokenFiller();
   }
 
   el.pulse.classList.remove(
@@ -3998,6 +4456,122 @@ function clearThinkingCueTimer() {
   state.thinkingCueTimer = null;
 }
 
+function clearFillerTimer() {
+  if (!state.fillerTimer) {
+    return;
+  }
+  clearTimeout(state.fillerTimer);
+  state.fillerTimer = null;
+}
+
+function cancelSpokenFiller() {
+  if (!window.speechSynthesis || typeof window.speechSynthesis.cancel !== "function") {
+    return;
+  }
+  try {
+    window.speechSynthesis.cancel();
+  } catch (_err) {
+    // ignore
+  }
+}
+
+function pickFillerPhrase() {
+  if (!Array.isArray(FILLER_PHRASES) || FILLER_PHRASES.length === 0) {
+    return "";
+  }
+  const available = FILLER_PHRASES.filter((s) => s && s !== state.lastFillerPhrase);
+  const pool = available.length > 0 ? available : FILLER_PHRASES.slice();
+  const idx = Math.floor(Math.random() * pool.length);
+  const phrase = String(pool[idx] || "").trim();
+  if (!phrase) {
+    return "";
+  }
+  state.lastFillerPhrase = phrase;
+  return phrase;
+}
+
+function speakThinkingFiller() {
+  const mode = normalizeFillerMode(state.uiSettings.fillerMode);
+  if (mode === "off") {
+    return;
+  }
+  if (!state.connected || !state.awaitingAssistantResponse || state.presence !== "thinking") {
+    return;
+  }
+  const maxPerTurn = normalizeFillerMaxPerTurn(state.uiSettings.fillerMaxPerTurn);
+  if (state.fillerCountForTurn >= maxPerTurn) {
+    return;
+  }
+  const now = Date.now();
+  const cooldownMs = normalizeFillerCooldownMs(state.uiSettings.fillerCooldownMs);
+  if (now - state.lastFillerAtMs < cooldownMs) {
+    return;
+  }
+  const minDelayMs = normalizeFillerDelayMs(state.uiSettings.fillerMinDelayMs);
+  const elapsedSinceCommit = state.lastCommitAtMs > 0 ? now - state.lastCommitAtMs : 0;
+  if (mode === "adaptive") {
+    const adaptiveFloor = minDelayMs + 900;
+    if (elapsedSinceCommit < adaptiveFloor) {
+      return;
+    }
+  } else if (mode === "occasional") {
+    if (elapsedSinceCommit < minDelayMs) {
+      return;
+    }
+  }
+
+  let text = "";
+  if (mode === "adaptive") {
+    text = "Thinking...";
+  } else {
+    text = pickFillerPhrase();
+  }
+  if (!text) {
+    return;
+  }
+
+  state.lastFillerAtMs = now;
+  state.fillerCountForTurn += 1;
+
+  const spokenAllowed = mode === "always";
+  if (spokenAllowed && window.speechSynthesis && typeof window.SpeechSynthesisUtterance === "function") {
+    try {
+      const utt = new window.SpeechSynthesisUtterance(text);
+      utt.rate = 1.0;
+      utt.pitch = 1.0;
+      utt.volume = 0.6;
+      window.speechSynthesis.speak(utt);
+    } catch (_err) {
+      // ignore; fallback to visual cue only
+    }
+  }
+  setCaption("", text, { clearAfterMs: mode === "adaptive" ? 900 : 1400 });
+}
+
+function scheduleThinkingFiller() {
+  clearFillerTimer();
+  const mode = normalizeFillerMode(state.uiSettings.fillerMode);
+  if (mode === "off") {
+    return;
+  }
+  if (!state.connected || !state.awaitingAssistantResponse || state.presence !== "thinking") {
+    return;
+  }
+  let delayMs = 0;
+  const minDelayMs = normalizeFillerDelayMs(state.uiSettings.fillerMinDelayMs);
+  const elapsed = state.lastCommitAtMs > 0 ? Date.now() - state.lastCommitAtMs : 0;
+  if (mode === "adaptive") {
+    const adaptiveFloor = minDelayMs + 900;
+    delayMs = Math.max(0, adaptiveFloor - elapsed);
+  } else if (mode === "occasional") {
+    delayMs = Math.max(0, minDelayMs - elapsed);
+  }
+  state.fillerTimer = setTimeout(() => {
+    state.fillerTimer = null;
+    speakThinkingFiller();
+  }, delayMs);
+}
+
 function scheduleSilenceBreaker() {
   clearSilenceBreakerTimer();
   clearThinkingCueTimer();
@@ -4015,11 +4589,11 @@ function scheduleSilenceBreaker() {
       return;
     }
     if (mode === "visual") {
-      setCaption("", "…", { clearAfterMs: 1200 });
+      setCaption("", "...", { clearAfterMs: 1200 });
       return;
     }
     if (mode === "speech") {
-      setCaption("", "…", { clearAfterMs: 1200 });
+      setCaption("", "...", { clearAfterMs: 1200 });
       void playThinkingCue();
     }
   }, delayMs);

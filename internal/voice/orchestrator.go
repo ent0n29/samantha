@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -62,18 +63,22 @@ type Orchestrator struct {
 }
 
 const (
-	memoryContextLimit         = 8
-	memoryContextTimeout       = 350 * time.Millisecond
-	memoryContextSoftWait      = 120 * time.Millisecond
-	memoryContextPrefetchFresh = 2 * time.Second
-	brainPrefetchFresh         = 3 * time.Second
-	brainPrefetchWaitBudget    = 80 * time.Millisecond
-	brainPrefetchMinCanonical  = 18
-	brainPrefetchMinWords      = 3
-	brainPrefetchStableRepeats = 2
-	wakeWordWindow             = 30 * time.Second
-	memorySaveTimeout          = 2 * time.Second
-	ttsFinalizeTimeout         = 10 * time.Second
+	memoryContextLimit           = 8
+	memoryContextTimeout         = 350 * time.Millisecond
+	memoryContextSoftWait        = 120 * time.Millisecond
+	memoryContextPrefetchFresh   = 2 * time.Second
+	brainPrefetchFresh           = 3 * time.Second
+	brainPrefetchWaitBudget      = 80 * time.Millisecond
+	brainPrefetchMinCanonical    = 18
+	brainPrefetchMinWords        = 3
+	brainPrefetchStableRepeats   = 2
+	brainPrefetchDebounce        = 550 * time.Millisecond
+	brainPrefetchEarlyMinWords   = 6
+	brainPrefetchEarlyAge        = 2 * time.Second
+	wakeWordWindow               = 30 * time.Second
+	memorySaveTimeout            = 2 * time.Second
+	ttsFinalizeTimeout           = 10 * time.Second
+	thinkingDeltaPreviewMaxRunes = 92
 )
 
 func NewOrchestrator(
@@ -255,13 +260,14 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 	}
 
 	var (
-		turnMu       sync.Mutex
-		turnCancel   context.CancelFunc
-		activeTurnID string
-		activeToken  int64
-		nextToken    int64
-		lastSampleHz = 16000
-		lastStopAt   time.Time
+		turnMu                   sync.Mutex
+		turnCancel               context.CancelFunc
+		activeTurnID             string
+		activeToken              int64
+		nextToken                int64
+		lastSampleHz             = 16000
+		lastStopAt               time.Time
+		assistantOutputStartedAt atomic.Int64
 
 		wakewordEnabled    bool
 		manualArmUntil     time.Time
@@ -283,6 +289,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 		partialStableCanonical string
 		partialStableRepeats   int
+		lastBrainPrefetchAt    time.Time
+		utteranceStartedAt     time.Time
+		semanticHintState      semanticEndpointDispatchState
 	)
 
 	startMemoryPrefetch := func() {
@@ -488,6 +497,35 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		}(specCtx, gen, canonical, rawText, doneCh, contextLines, personaID)
 	}
 
+	maybeStartBrainPrefetch := func(specText string, now time.Time, utteranceAge time.Duration) {
+		canonical := canonicalizeBrainPrefetchInput(specText)
+		if canonical == "" {
+			return
+		}
+		earlyStart := shouldStartBrainPrefetchEarly(specText, canonical, utteranceAge)
+		if canonical == partialStableCanonical {
+			partialStableRepeats++
+		} else if canonicalIsProgressiveContinuation(partialStableCanonical, canonical) {
+			partialStableCanonical = canonical
+			partialStableRepeats++
+		} else {
+			partialStableCanonical = canonical
+			partialStableRepeats = 1
+		}
+		requiredRepeats := brainPrefetchStableRepeats
+		if earlyStart {
+			requiredRepeats = 1
+		}
+		if partialStableRepeats < requiredRepeats {
+			return
+		}
+		if !lastBrainPrefetchAt.IsZero() && now.Sub(lastBrainPrefetchAt) < brainPrefetchDebounce {
+			return
+		}
+		lastBrainPrefetchAt = now
+		startBrainPrefetch(specText, canonical)
+	}
+
 	startMemoryPrefetch()
 
 	cancelActiveTurn := func(reason string) {
@@ -541,9 +579,27 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				_ = o.sessions.Touch(s.ID)
 				switch m.Action {
 				case "interrupt":
+					reason := normalizeControlReason(m.Reason)
+					if reason == "" {
+						reason = "unknown"
+					}
+					o.metrics.ObserveTurnIndicator("interrupt_reason_" + reason)
+					if reason == "barge_interrupt" {
+						startedAtMs := assistantOutputStartedAt.Load()
+						if startedAtMs > 0 {
+							if d := time.Since(time.UnixMilli(startedAtMs)); d >= 0 && d <= 500*time.Millisecond {
+								o.metrics.ObserveTurnIndicator("cutoff_suspected")
+							}
+						}
+					}
 					_ = o.sessions.Interrupt(s.ID)
 					cancelActiveTurn("interrupted")
 				case "stop":
+					reason := normalizeControlReason(m.Reason)
+					if reason == "" {
+						reason = "unknown"
+					}
+					o.metrics.ObserveTurnIndicator("auto_commit_reason_" + reason)
 					lastStopAt = time.Now()
 					_ = sttSession.SendAudioChunk(ctx, "", lastSampleHz, true)
 				case "approve_task_step":
@@ -601,6 +657,44 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 								Type:      protocol.TypeErrorEvent,
 								SessionID: s.ID,
 								Code:      "task_cancel_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+					}
+				case "pause_task":
+					if o.taskService != nil && o.taskService.Enabled() {
+						var err error
+						if strings.TrimSpace(m.TaskID) != "" {
+							_, err = o.taskService.PauseTask(ctx, m.TaskID, "Paused by user.")
+						} else {
+							_, err = o.taskService.PauseActiveForSession(ctx, s.ID, "Paused by user.")
+						}
+						if err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_pause_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+					}
+				case "resume_task":
+					if o.taskService != nil && o.taskService.Enabled() {
+						var err error
+						if strings.TrimSpace(m.TaskID) != "" {
+							_, err = o.taskService.ResumeTask(ctx, m.TaskID)
+						} else {
+							_, err = o.taskService.ResumeLatestForSession(ctx, s.ID)
+						}
+						if err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_resume_failed",
 								Source:    "task_runtime",
 								Retryable: false,
 								Detail:    err.Error(),
@@ -673,7 +767,31 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 
 			switch evt.Type {
 			case STTEventPartial:
+				now := time.Now()
 				partialText := strings.TrimSpace(evt.Text)
+				if partialText != "" && utteranceStartedAt.IsZero() {
+					utteranceStartedAt = now
+				}
+				if partialText != "" {
+					if hint, ok := buildSemanticEndpointHint(partialText, evt.Confidence, now.Sub(utteranceStartedAt)); ok {
+						reason := strings.TrimSpace(strings.ToLower(hint.Reason))
+						if reason == "" {
+							reason = "neutral"
+						}
+						if semanticHintState.ShouldEmit(hint, now) {
+							o.metrics.ObserveTurnIndicator("semantic_hint_" + reason)
+							o.send(outbound, protocol.SemanticEndpointHint{
+								Type:         protocol.TypeSemanticEndpointHint,
+								SessionID:    s.ID,
+								Reason:       reason,
+								Confidence:   hint.Confidence,
+								HoldMS:       hint.Hold.Milliseconds(),
+								ShouldCommit: hint.ShouldCommit,
+								TSMs:         evt.Timestamp,
+							})
+						}
+					}
+				}
 				specText := partialText
 				if partialText != "" {
 					startMemoryPrefetch()
@@ -694,29 +812,12 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 							// background speech while the wake word is off.
 							partialStableCanonical = ""
 							partialStableRepeats = 0
+							lastBrainPrefetchAt = time.Time{}
 						} else if strings.TrimSpace(specText) != "" {
-							canonical := canonicalizeBrainPrefetchInput(specText)
-							if canonical == partialStableCanonical {
-								partialStableRepeats++
-							} else {
-								partialStableCanonical = canonical
-								partialStableRepeats = 1
-							}
-							if partialStableRepeats >= brainPrefetchStableRepeats {
-								startBrainPrefetch(specText, canonical)
-							}
+							maybeStartBrainPrefetch(specText, now, now.Sub(utteranceStartedAt))
 						}
 					} else if strings.TrimSpace(specText) != "" {
-						canonical := canonicalizeBrainPrefetchInput(specText)
-						if canonical == partialStableCanonical {
-							partialStableRepeats++
-						} else {
-							partialStableCanonical = canonical
-							partialStableRepeats = 1
-						}
-						if partialStableRepeats >= brainPrefetchStableRepeats {
-							startBrainPrefetch(specText, canonical)
-						}
+						maybeStartBrainPrefetch(specText, now, now.Sub(utteranceStartedAt))
 					}
 				}
 				o.send(outbound, protocol.STTPartial{
@@ -731,12 +832,15 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				if committedText == "" {
 					continue
 				}
+				utteranceStartedAt = time.Time{}
+				semanticHintState.Reset()
 				if !lastStopAt.IsZero() {
 					o.metrics.ObserveTurnStage("stop_to_stt_committed", time.Since(lastStopAt))
 					lastStopAt = time.Time{}
 				}
 				partialStableCanonical = ""
 				partialStableRepeats = 0
+				lastBrainPrefetchAt = time.Time{}
 
 				o.send(outbound, protocol.STTCommitted{
 					Type:      protocol.TypeSTTCommitted,
@@ -878,6 +982,34 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 						cancelBrainPrefetch()
 						continue
 					}
+					if lowerCommit == "pause task" {
+						if _, err := o.taskService.PauseActiveForSession(ctx, s.ID, "Paused by user."); err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_pause_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+						cancelBrainPrefetch()
+						continue
+					}
+					if lowerCommit == "resume task" || lowerCommit == "continue task" {
+						if _, err := o.taskService.ResumeLatestForSession(ctx, s.ID); err != nil && !errors.Is(err, tasks.ErrTaskNotFound) {
+							o.send(outbound, protocol.ErrorEvent{
+								Type:      protocol.TypeErrorEvent,
+								SessionID: s.ID,
+								Code:      "task_resume_failed",
+								Source:    "task_runtime",
+								Retryable: false,
+								Detail:    err.Error(),
+							})
+						}
+						cancelBrainPrefetch()
+						continue
+					}
 
 					createdTask, handledByTaskRuntime, err := o.taskService.MaybeCreateFromUtterance(ctx, s.ID, s.UserID, committedText)
 					if err != nil {
@@ -950,6 +1082,7 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 				committedAt := time.Now()
 				prefetchedRecent, prefetchedReadyAt, prefetchedReady := getMemoryPrefetch()
 				_ = o.sessions.StartTurn(s.ID, turnID)
+				assistantOutputStartedAt.Store(0)
 				turnCtx, cancel := context.WithCancel(ctx)
 
 				turnMu.Lock()
@@ -971,7 +1104,9 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 						turnMu.Unlock()
 					}()
 
-					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, committedAt, prefetchedRecent, prefetchedReadyAt, prefetchedReady, prefetchedBrain, outbound); err != nil {
+					if err := o.runAssistantTurn(turnCtx, *s, turnText, turnID, committedAt, prefetchedRecent, prefetchedReadyAt, prefetchedReady, prefetchedBrain, func() {
+						assistantOutputStartedAt.CompareAndSwap(0, time.Now().UnixMilli())
+					}, outbound); err != nil {
 						if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 							return
 						}
@@ -1013,6 +1148,7 @@ func (o *Orchestrator) runAssistantTurn(
 	prefetchedReadyAt time.Time,
 	prefetchedReady bool,
 	prefetchedBrain *brainPrefetchResult,
+	markAssistantOutputStart func(),
 	outbound chan<- any,
 ) error {
 	start := time.Now()
@@ -1142,10 +1278,20 @@ func (o *Orchestrator) runAssistantTurn(
 	brainFirstDeltaObserved := false
 	brainFirstDeltaToAudioObserved := false
 	var brainFirstDeltaAt time.Time
+	var assistantOutputStartOnce sync.Once
+	markAssistantStarted := func() {
+		if markAssistantOutputStart == nil {
+			return
+		}
+		assistantOutputStartOnce.Do(markAssistantOutputStart)
+	}
 	speechProduced := false
 	speechSent := false
 	var speechPending strings.Builder
 	speechSan := newSpeechSanitizer()
+	prosody := newProsodyPlanner()
+	firstThinkingDeltaObserved := false
+	lastThinkingDelta := ""
 	firstTextSignal := make(chan struct{})
 	var firstTextSignalOnce sync.Once
 	markFirstTextObserved := func() {
@@ -1177,8 +1323,15 @@ func (o *Orchestrator) runAssistantTurn(
 					case TTSEventAudio:
 						if !firstAudioObserved {
 							firstAudioObserved = true
+							markAssistantStarted()
 							o.metrics.ObserveTurnStage("commit_to_first_audio", time.Since(committedAt))
 							o.metrics.ObserveFirstAudioLatency(time.Since(start))
+							o.metrics.ObserveTurnIndicator("assistant_first_audio")
+							o.send(outbound, protocol.SystemEvent{
+								Type:      protocol.TypeSystemEvent,
+								SessionID: s.ID,
+								Code:      "assistant_first_audio",
+							})
 							if brainFirstDeltaObserved && !brainFirstDeltaToAudioObserved && !brainFirstDeltaAt.IsZero() {
 								brainFirstDeltaToAudioObserved = true
 								o.metrics.ObserveTurnStage("brain_first_delta_to_first_audio", time.Since(brainFirstDeltaAt))
@@ -1280,6 +1433,51 @@ func (o *Orchestrator) runAssistantTurn(
 		return ttsStream.SendText(ctx, out, true)
 	}
 
+	queueSpeechSegment := func(segment string) error {
+		segment = strings.TrimSpace(segment)
+		if segment == "" {
+			return nil
+		}
+		_ = adoptTTSResult(false)
+		if err := flushPendingSpeech(); err != nil {
+			return err
+		}
+		if ttsReady && ttsErr == nil && ttsStream != nil {
+			speechSent = true
+			return ttsStream.SendText(ctx, segment, true)
+		}
+		if speechPending.Len() > 0 {
+			lastByte := speechPending.String()[speechPending.Len()-1]
+			if lastByte != ' ' && lastByte != '\n' {
+				speechPending.WriteByte(' ')
+			}
+		}
+		speechPending.WriteString(segment)
+		return nil
+	}
+
+	emitThinkingDelta := func(rawDelta string) {
+		if firstTextObserved {
+			return
+		}
+		preview := thinkingDeltaPreview(rawDelta)
+		if preview == "" || preview == lastThinkingDelta {
+			return
+		}
+		lastThinkingDelta = preview
+		if !firstThinkingDeltaObserved {
+			firstThinkingDeltaObserved = true
+			o.metrics.ObserveTurnStage("commit_to_thinking_delta", time.Since(committedAt))
+			o.metrics.ObserveTurnIndicator("assistant_thinking_delta")
+		}
+		o.send(outbound, protocol.AssistantThinkingDelta{
+			Type:      protocol.TypeAssistantThinkingDelta,
+			SessionID: s.ID,
+			TurnID:    turnID,
+			TextDelta: preview,
+		})
+	}
+
 	// Keep voice UX responsive: if the model hasn't started producing text quickly,
 	// emit a short visual progress cue instead of leaving dead air.
 	if o.assistantWorkingDelay > 0 {
@@ -1292,6 +1490,8 @@ func (o *Orchestrator) runAssistantTurn(
 			case <-firstTextSignal:
 				return
 			case <-timer.C:
+				o.metrics.ObserveTurnStage("commit_to_assistant_working", time.Since(committedAt))
+				o.metrics.ObserveTurnIndicator("assistant_working")
 				o.send(outbound, protocol.SystemEvent{
 					Type:      protocol.TypeSystemEvent,
 					SessionID: s.ID,
@@ -1309,6 +1509,7 @@ func (o *Orchestrator) runAssistantTurn(
 			brainFirstDeltaAt = time.Now()
 			o.metrics.ObserveTurnStage("commit_to_brain_first_delta", time.Since(committedAt))
 		}
+		emitThinkingDelta(delta)
 		delta = leadFilter.Consume(delta)
 		if strings.TrimSpace(delta) == "" {
 			return nil
@@ -1316,8 +1517,15 @@ func (o *Orchestrator) runAssistantTurn(
 		assistantOut += delta
 		if !firstTextObserved && strings.TrimSpace(delta) != "" {
 			firstTextObserved = true
+			markAssistantStarted()
 			markFirstTextObserved()
 			o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
+			o.metrics.ObserveTurnIndicator("assistant_first_text")
+			o.send(outbound, protocol.SystemEvent{
+				Type:      protocol.TypeSystemEvent,
+				SessionID: s.ID,
+				Code:      "assistant_first_text",
+			})
 		}
 		o.send(outbound, protocol.AssistantTextDelta{
 			Type:      protocol.TypeAssistantTextDelta,
@@ -1331,16 +1539,12 @@ func (o *Orchestrator) runAssistantTurn(
 		}
 		speechDelta = bridgeSpeechDelta(delta, speechDelta, speechProduced)
 		speechProduced = true
-
-		_ = adoptTTSResult(false)
-		if err := flushPendingSpeech(); err != nil {
-			return err
+		segments := prosody.Push(speechDelta)
+		for _, segment := range segments {
+			if err := queueSpeechSegment(segment); err != nil {
+				return err
+			}
 		}
-		if ttsReady && ttsErr == nil && ttsStream != nil {
-			speechSent = true
-			return ttsStream.SendText(ctx, speechDelta, true)
-		}
-		speechPending.WriteString(speechDelta)
 		return nil
 	}
 
@@ -1379,8 +1583,15 @@ func (o *Orchestrator) runAssistantTurn(
 		if assistantOut != "" {
 			if !firstTextObserved && strings.TrimSpace(assistantOut) != "" {
 				firstTextObserved = true
+				markAssistantStarted()
 				markFirstTextObserved()
 				o.metrics.ObserveTurnStage("commit_to_first_text", time.Since(committedAt))
+				o.metrics.ObserveTurnIndicator("assistant_first_text")
+				o.send(outbound, protocol.SystemEvent{
+					Type:      protocol.TypeSystemEvent,
+					SessionID: s.ID,
+					Code:      "assistant_first_text",
+				})
 			}
 			o.send(outbound, protocol.AssistantTextDelta{
 				Type:      protocol.TypeAssistantTextDelta,
@@ -1392,17 +1603,18 @@ func (o *Orchestrator) runAssistantTurn(
 			if speechOut != "" {
 				speechOut = bridgeSpeechDelta(assistantOut, speechOut, speechProduced)
 				speechProduced = true
-				_ = adoptTTSResult(false)
-				if err := flushPendingSpeech(); err != nil {
-					return err
-				}
-				if ttsReady && ttsErr == nil && ttsStream != nil {
-					speechSent = true
-					_ = ttsStream.SendText(ctx, speechOut, true)
-				} else {
-					speechPending.WriteString(speechOut)
+				segments := prosody.Push(speechOut)
+				for _, segment := range segments {
+					if err := queueSpeechSegment(segment); err != nil {
+						return err
+					}
 				}
 			}
+		}
+	}
+	for _, segment := range prosody.Finalize() {
+		if err := queueSpeechSegment(segment); err != nil {
+			return err
 		}
 	}
 	_ = adoptTTSResult(true)
@@ -1578,6 +1790,40 @@ func (o *Orchestrator) sendTaskEvent(outbound chan<- any, evt tasks.Event) {
 			RiskLevel:        string(evt.RiskLevel),
 			RequiresApproval: evt.RequiresApproval,
 		})
+	case tasks.EventTaskPlanGraph:
+		nodes := make([]protocol.TaskPlanGraphNode, 0)
+		edges := make([]protocol.TaskPlanGraphEdge, 0)
+		if evt.Graph != nil {
+			nodes = make([]protocol.TaskPlanGraphNode, 0, len(evt.Graph.Nodes))
+			for _, n := range evt.Graph.Nodes {
+				nodes = append(nodes, protocol.TaskPlanGraphNode{
+					ID:               n.ID,
+					Seq:              n.Seq,
+					Title:            n.Title,
+					Kind:             n.Kind,
+					Status:           string(n.Status),
+					RiskLevel:        string(n.RiskLevel),
+					RequiresApproval: n.RequiresApproval,
+				})
+			}
+			edges = make([]protocol.TaskPlanGraphEdge, 0, len(evt.Graph.Edges))
+			for _, e := range evt.Graph.Edges {
+				edges = append(edges, protocol.TaskPlanGraphEdge{
+					From: e.From,
+					To:   e.To,
+					Kind: e.Kind,
+				})
+			}
+		}
+		o.send(outbound, protocol.TaskPlanGraph{
+			Type:      protocol.TypeTaskPlanGraph,
+			SessionID: evt.SessionID,
+			TaskID:    evt.TaskID,
+			Status:    string(evt.Status),
+			Detail:    evt.Detail,
+			Nodes:     nodes,
+			Edges:     edges,
+		})
 	case tasks.EventTaskPlanDelta:
 		o.send(outbound, protocol.TaskPlanDelta{
 			Type:           protocol.TypeTaskPlanDelta,
@@ -1670,7 +1916,7 @@ func (o *Orchestrator) taskStatusSnapshotForSession(sessionID string) protocol.T
 			snapshot.Active = append(snapshot.Active, item)
 		case tasks.TaskStatusAwaitingApproval:
 			snapshot.AwaitingApproval = append(snapshot.AwaitingApproval, item)
-		case tasks.TaskStatusPlanned:
+		case tasks.TaskStatusPlanned, tasks.TaskStatusPaused:
 			snapshot.Planned = append(snapshot.Planned, item)
 		}
 	}
@@ -1687,6 +1933,10 @@ func outboundMessageMeta(msg any) (msgType string, critical bool) {
 		return string(m.Type), true
 	case protocol.AssistantAudioChunk:
 		return string(m.Type), false
+	case protocol.AssistantThinkingDelta:
+		return string(m.Type), false
+	case protocol.SemanticEndpointHint:
+		return string(m.Type), false
 	case protocol.AssistantTextDelta:
 		return string(m.Type), false
 	case protocol.STTPartial:
@@ -1695,6 +1945,8 @@ func outboundMessageMeta(msg any) (msgType string, critical bool) {
 		return string(m.Type), false
 	case protocol.TaskCreated:
 		return string(m.Type), true
+	case protocol.TaskPlanGraph:
+		return string(m.Type), false
 	case protocol.TaskPlanDelta:
 		return string(m.Type), false
 	case protocol.TaskStepStarted:
@@ -1714,6 +1966,33 @@ func outboundMessageMeta(msg any) (msgType string, critical bool) {
 	default:
 		return "unknown", false
 	}
+}
+
+func normalizeControlReason(raw string) string {
+	reason := strings.ToLower(strings.TrimSpace(raw))
+	if reason == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(reason))
+	prevUnderscore := false
+	for _, r := range reason {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevUnderscore = false
+		default:
+			if !prevUnderscore {
+				b.WriteByte('_')
+				prevUnderscore = true
+			}
+		}
+	}
+	out := strings.Trim(b.String(), "_")
+	if out == "" {
+		return ""
+	}
+	return out
 }
 
 func ttsSettingsForProfile(p PersonaProfile) TTSSettings {
@@ -1784,6 +2063,27 @@ func canonicalizeBrainPrefetchInput(raw string) string {
 	return strings.TrimSpace(b.String())
 }
 
+func canonicalIsProgressiveContinuation(prev, next string) bool {
+	prev = strings.TrimSpace(prev)
+	next = strings.TrimSpace(next)
+	if prev == "" || next == "" {
+		return false
+	}
+	if prev == next {
+		return true
+	}
+	// Common path for partial STT growth: "build api" -> "build api endpoint".
+	if strings.HasPrefix(next, prev) {
+		return true
+	}
+	// Accept very small rewinds caused by STT punctuation/word correction.
+	if strings.HasPrefix(prev, next) {
+		const maxRollbackChars = 6
+		return len(prev)-len(next) <= maxRollbackChars
+	}
+	return false
+}
+
 func shouldSpeculateBrainCanonical(canonical string) bool {
 	canonical = strings.TrimSpace(canonical)
 	if len(canonical) < brainPrefetchMinCanonical {
@@ -1796,4 +2096,75 @@ func shouldSpeculateBrainCanonical(canonical string) bool {
 		}
 	}
 	return words >= brainPrefetchMinWords
+}
+
+func shouldStartBrainPrefetchEarly(partialText, canonical string, utteranceAge time.Duration) bool {
+	words := wordsInCanonical(canonical)
+	normalized := normalizeSemanticEndpointText(partialText)
+	if !shouldSpeculateBrainCanonical(canonical) {
+		// For short terminal commands, allow one early speculation if we still have enough
+		// language signal to avoid noisy one-word prefetch churn.
+		if hasSemanticTerminalCue(normalized) && words >= brainPrefetchMinWords && len(canonical) >= 12 {
+			return true
+		}
+		return false
+	}
+	if words >= brainPrefetchEarlyMinWords {
+		return true
+	}
+	if hasSemanticTerminalCue(normalized) && words >= brainPrefetchMinWords {
+		return true
+	}
+	if utteranceAge >= brainPrefetchEarlyAge && words >= brainPrefetchMinWords+1 {
+		return true
+	}
+	return false
+}
+
+func wordsInCanonical(canonical string) int {
+	canonical = strings.TrimSpace(canonical)
+	if canonical == "" {
+		return 0
+	}
+	words := 1
+	for i := 0; i < len(canonical); i++ {
+		if canonical[i] == ' ' {
+			words++
+		}
+	}
+	return words
+}
+
+func thinkingDeltaPreview(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+
+	preview := strings.TrimSpace(stripAssistantLeadPreamble(raw))
+	if preview == "" {
+		preview = raw
+	}
+	preview = strings.Join(strings.Fields(preview), " ")
+	if preview == "" {
+		return ""
+	}
+
+	canon := canonicalizeForLeadFiller(preview)
+	if canon == "" {
+		return ""
+	}
+	if isAssistantLeadAckPrefix(canon) || isAssistantLeadFillerPrefix(canon) {
+		return ""
+	}
+
+	runes := []rune(preview)
+	if len(runes) <= thinkingDeltaPreviewMaxRunes {
+		return preview
+	}
+	cut := string(runes[:thinkingDeltaPreviewMaxRunes])
+	if idx := strings.LastIndex(cut, " "); idx >= 24 {
+		cut = cut[:idx]
+	}
+	return strings.TrimSpace(cut) + "..."
 }

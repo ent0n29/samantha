@@ -75,7 +75,16 @@ Response (`200`):
   "task_runtime_enabled": false,
   "task_desk_default": false,
   "silence_breaker_mode": "visual",
-  "silence_breaker_delay_ms": 750
+  "silence_breaker_delay_ms": 750,
+  "vad_profile": "default",
+  "vad_min_utterance_ms": 650,
+  "vad_grace_ms": 220,
+  "audio_overlap_ms": 22,
+  "local_stt_profile": "balanced",
+  "filler_mode": "adaptive",
+  "filler_min_delay_ms": 1200,
+  "filler_cooldown_ms": 18000,
+  "filler_max_per_turn": 1
 }
 ```
 
@@ -88,6 +97,12 @@ Response (`200`):
 {
   "generated_at": "2026-02-12T18:24:10.410157Z",
   "window_size": 256,
+  "indicators": [
+    {
+      "name": "assistant_working",
+      "count": 12
+    }
+  ],
   "stages": [
     {
       "stage": "commit_to_first_audio",
@@ -189,6 +204,21 @@ Request body (optional):
 }
 ```
 
+### `POST /v1/tasks/{id}/pause`
+
+Pauses a running/planned task without discarding it.
+
+Request body (optional):
+```json
+{
+  "reason": "Paused by API."
+}
+```
+
+### `POST /v1/tasks/{id}/resume`
+
+Resumes a paused task (immediately if no active task is running for the session; otherwise queued).
+
 ### `GET /v1/tasks/{id}/events?limit=100`
 
 Returns recent event history for one task (oldest to newest, capped by `limit`).
@@ -214,7 +244,8 @@ Client sends:
 {
   "type": "client_control",
   "session_id": "...",
-  "action": "stop"
+  "action": "stop",
+  "reason": "silence_release"
 }
 ```
 
@@ -223,18 +254,22 @@ Known `action` values:
 - `interrupt`: cancel the current assistant turn (barge-in)
 - `wakeword_on`, `wakeword_off`
 - `manual_arm`: allow one wake-word-bypassed utterance in hands-free mode
-- `approve_task_step`, `deny_task_step`, `cancel_task`
+- `approve_task_step`, `deny_task_step`, `cancel_task`, `pause_task`, `resume_task`
+- optional `reason`: telemetry tag (e.g. `silence_release`, `continuation_hold`, `manual_stop`, `barge_interrupt`)
 
 Server sends:
 
 - `stt_partial`
 - `stt_committed`
+- `semantic_endpoint_hint` (server semantic turn-taking guidance: hold/confidence/should_commit)
+- `assistant_thinking_delta` (early cognition hint while full answer is still forming)
 - `assistant_text_delta` (streaming assistant text)
 - `assistant_audio_chunk` (base64 audio)
 - `assistant_turn_end`
-- `system_event` (e.g. `wake_word`, `assistant_working`)
+- `system_event` (e.g. `wake_word`, `assistant_working`, `assistant_first_text`, `assistant_first_audio`)
 - `error_event`
 - `task_created`
+- `task_plan_graph`
 - `task_plan_delta`
 - `task_step_started`
 - `task_step_log`

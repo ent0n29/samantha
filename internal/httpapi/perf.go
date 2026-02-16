@@ -8,6 +8,7 @@ func (s *Server) handlePerfLatency(w http.ResponseWriter, _ *http.Request) {
 			"generated_at": "",
 			"window_size":  0,
 			"stages":       []any{},
+			"indicators":   []any{},
 		})
 		return
 	}

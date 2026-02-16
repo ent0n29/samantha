@@ -17,6 +17,11 @@ type Config struct {
 	FirstAudioSLO            time.Duration
 	AssistantWorkingDelay    time.Duration
 	UISilenceBreakerDelay    time.Duration
+	UIVADMinUtterance        time.Duration
+	UIVADGrace               time.Duration
+	UIAudioSegmentOverlap    time.Duration
+	UIFillerMinDelay         time.Duration
+	UIFillerCooldown         time.Duration
 	MetricsNamespace         string
 	TaskRuntimeEnabled       bool
 	TaskTimeout              time.Duration
@@ -29,6 +34,7 @@ type Config struct {
 
 	UISilenceBreakerMode string
 	UIVADProfile         string
+	UIFillerMode         string
 
 	WSBackpressureMode string
 
@@ -48,11 +54,14 @@ type Config struct {
 	LocalWhisperThreads   int
 	LocalWhisperBeamSize  int
 	LocalWhisperBestOf    int
+	LocalSTTProfile       string
+	LocalSTTAutoDownload  bool
 
 	LocalKokoroPython       string
 	LocalKokoroWorkerScript string
 	LocalKokoroVoice        string
 	LocalKokoroLangCode     string
+	UIFillerMaxPerTurn      int
 
 	OpenClawAdapterMode       string
 	OpenClawGatewayURL        string
@@ -70,6 +79,9 @@ type Config struct {
 
 // Load reads environment variables and applies safe defaults.
 func Load() (Config, error) {
+	localSTTProfile := envOrDefault("APP_LOCAL_STT_PROFILE", "balanced")
+	presetModelPath, presetBeamSize, presetBestOf := localSTTPresetDefaults(localSTTProfile)
+
 	cfg := Config{
 		BindAddr:            envOrDefault("APP_BIND_ADDR", ":8080"),
 		MetricsNamespace:    envOrDefault("APP_METRICS_NAMESPACE", "samantha"),
@@ -85,14 +97,14 @@ func Load() (Config, error) {
 		// Prefer explicit commit driven by our client-side VAD and controls.
 		ElevenLabsSTTCommitStrategy: envOrDefault("ELEVENLABS_STT_COMMIT_STRATEGY", "manual"),
 		LocalWhisperCLI:             envOrDefault("LOCAL_WHISPER_CLI", "whisper-cli"),
-		// Default to a fast English Whisper model for local realtime use.
-		LocalWhisperModelPath: envOrDefault("LOCAL_WHISPER_MODEL_PATH", ".models/whisper/ggml-tiny.en.bin"),
-		LocalWhisperLanguage:  envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),
+		LocalWhisperModelPath:       envOrDefault("LOCAL_WHISPER_MODEL_PATH", presetModelPath),
+		LocalWhisperLanguage:        envOrDefault("LOCAL_WHISPER_LANGUAGE", "en"),
 		// 0 means "auto" (picked based on CPU count).
-		LocalWhisperThreads: 0,
-		// Slightly favor transcript quality without changing the model size.
-		LocalWhisperBeamSize:      2,
-		LocalWhisperBestOf:        2,
+		LocalWhisperThreads:       0,
+		LocalWhisperBeamSize:      presetBeamSize,
+		LocalWhisperBestOf:        presetBestOf,
+		LocalSTTProfile:           localSTTProfile,
+		LocalSTTAutoDownload:      true,
 		LocalKokoroPython:         envOrDefault("LOCAL_KOKORO_PYTHON", ""),
 		LocalKokoroWorkerScript:   envOrDefault("LOCAL_KOKORO_WORKER_SCRIPT", "scripts/kokoro_worker.py"),
 		LocalKokoroVoice:          envOrDefault("LOCAL_KOKORO_VOICE", "af_sarah"),
@@ -114,6 +126,12 @@ func Load() (Config, error) {
 		FirstAudioSLO:             700 * time.Millisecond,
 		AssistantWorkingDelay:     500 * time.Millisecond,
 		UISilenceBreakerDelay:     750 * time.Millisecond,
+		UIVADMinUtterance:         650 * time.Millisecond,
+		UIVADGrace:                220 * time.Millisecond,
+		UIAudioSegmentOverlap:     22 * time.Millisecond,
+		UIFillerMinDelay:          1200 * time.Millisecond,
+		UIFillerCooldown:          18 * time.Second,
+		UIFillerMaxPerTurn:        1,
 		TaskRuntimeEnabled:        false,
 		TaskTimeout:               20 * time.Minute,
 		TaskIdempotencyWindow:     10 * time.Second,
@@ -122,6 +140,7 @@ func Load() (Config, error) {
 		UITaskDeskDefault:         false,
 		UISilenceBreakerMode:      envOrDefault("APP_UI_SILENCE_BREAKER_MODE", "visual"),
 		UIVADProfile:              envOrDefault("APP_UI_VAD_PROFILE", "default"),
+		UIFillerMode:              envOrDefault("APP_FILLER_MODE", "adaptive"),
 		WSBackpressureMode:        envOrDefault("APP_WS_BACKPRESSURE_MODE", "drop"),
 		OpenClawHTTPStreamStrict:  false,
 	}
@@ -162,6 +181,26 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.UIVADMinUtterance, err = durationFromEnv("APP_UI_VAD_MIN_UTTERANCE", cfg.UIVADMinUtterance)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UIVADGrace, err = durationFromEnv("APP_UI_VAD_GRACE", cfg.UIVADGrace)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UIAudioSegmentOverlap, err = durationFromEnv("APP_UI_AUDIO_SEGMENT_OVERLAP", cfg.UIAudioSegmentOverlap)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UIFillerMinDelay, err = durationFromEnv("APP_FILLER_MIN_DELAY", cfg.UIFillerMinDelay)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.UIFillerCooldown, err = durationFromEnv("APP_FILLER_COOLDOWN", cfg.UIFillerCooldown)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.TaskTimeout, err = durationFromEnv("APP_TASK_TIMEOUT", cfg.TaskTimeout)
 	if err != nil {
 		return Config{}, err
@@ -194,6 +233,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.LocalSTTAutoDownload, err = boolFromEnv("APP_LOCAL_STT_AUTO_MODEL_DOWNLOAD", cfg.LocalSTTAutoDownload)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg.OpenClawHTTPStreamStrict, err = boolFromEnv("OPENCLAW_HTTP_STREAM_STRICT", cfg.OpenClawHTTPStreamStrict)
 	if err != nil {
 		return Config{}, err
@@ -219,6 +262,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.UIFillerMaxPerTurn, err = intFromEnv("APP_FILLER_MAX_PER_TURN", cfg.UIFillerMaxPerTurn)
+	if err != nil {
+		return Config{}, err
+	}
 
 	if cfg.SessionInactivityTimeout < 5*time.Second {
 		return Config{}, fmt.Errorf("APP_SESSION_INACTIVITY_TIMEOUT must be at least 5s")
@@ -231,6 +278,30 @@ func Load() (Config, error) {
 	}
 	if cfg.UISilenceBreakerDelay < 0 {
 		return Config{}, fmt.Errorf("APP_UI_SILENCE_BREAKER_DELAY must be >= 0")
+	}
+	if cfg.UIVADMinUtterance < 0 {
+		return Config{}, fmt.Errorf("APP_UI_VAD_MIN_UTTERANCE must be >= 0")
+	}
+	if cfg.UIVADGrace < 0 {
+		return Config{}, fmt.Errorf("APP_UI_VAD_GRACE must be >= 0")
+	}
+	if cfg.UIAudioSegmentOverlap < 0 {
+		return Config{}, fmt.Errorf("APP_UI_AUDIO_SEGMENT_OVERLAP must be >= 0")
+	}
+	if cfg.UIAudioSegmentOverlap > 150*time.Millisecond {
+		return Config{}, fmt.Errorf("APP_UI_AUDIO_SEGMENT_OVERLAP must be <= 150ms")
+	}
+	if cfg.UIFillerMinDelay < 0 {
+		return Config{}, fmt.Errorf("APP_FILLER_MIN_DELAY must be >= 0")
+	}
+	if cfg.UIFillerCooldown < 0 {
+		return Config{}, fmt.Errorf("APP_FILLER_COOLDOWN must be >= 0")
+	}
+	if cfg.UIFillerMaxPerTurn < 0 {
+		return Config{}, fmt.Errorf("APP_FILLER_MAX_PER_TURN must be >= 0")
+	}
+	if cfg.UIFillerMaxPerTurn > 10 {
+		return Config{}, fmt.Errorf("APP_FILLER_MAX_PER_TURN must be <= 10")
 	}
 	if cfg.TaskTimeout <= 0 {
 		return Config{}, fmt.Errorf("APP_TASK_TIMEOUT must be > 0")
@@ -258,6 +329,20 @@ func Load() (Config, error) {
 	}
 	if cfg.UIVADProfile != "snappy" && cfg.UIVADProfile != "default" && cfg.UIVADProfile != "patient" {
 		return Config{}, fmt.Errorf("APP_UI_VAD_PROFILE must be one of: default|patient|snappy")
+	}
+	cfg.UIFillerMode = strings.ToLower(trimSpace(cfg.UIFillerMode))
+	if cfg.UIFillerMode == "" {
+		cfg.UIFillerMode = "occasional"
+	}
+	if cfg.UIFillerMode != "off" && cfg.UIFillerMode != "adaptive" && cfg.UIFillerMode != "occasional" && cfg.UIFillerMode != "always" {
+		return Config{}, fmt.Errorf("APP_FILLER_MODE must be one of: off|adaptive|occasional|always")
+	}
+	cfg.LocalSTTProfile = strings.ToLower(trimSpace(cfg.LocalSTTProfile))
+	if cfg.LocalSTTProfile == "" {
+		cfg.LocalSTTProfile = "balanced"
+	}
+	if cfg.LocalSTTProfile != "fast" && cfg.LocalSTTProfile != "balanced" && cfg.LocalSTTProfile != "accurate" {
+		return Config{}, fmt.Errorf("APP_LOCAL_STT_PROFILE must be one of: fast|balanced|accurate")
 	}
 	if cfg.MemoryEmbeddingDim <= 0 {
 		return Config{}, fmt.Errorf("MEMORY_EMBEDDING_DIM must be positive")
@@ -353,5 +438,16 @@ func boolFromEnv(key string, fallback bool) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("%s parse error: expected bool", key)
+	}
+}
+
+func localSTTPresetDefaults(profile string) (modelPath string, beamSize int, bestOf int) {
+	switch strings.ToLower(trimSpace(profile)) {
+	case "fast":
+		return ".models/whisper/ggml-tiny.en.bin", 1, 1
+	case "accurate":
+		return ".models/whisper/ggml-small.en.bin", 3, 3
+	default:
+		return ".models/whisper/ggml-base.en.bin", 2, 2
 	}
 }

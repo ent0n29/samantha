@@ -100,6 +100,13 @@ func (m *Metrics) ObserveTurnStage(stage string, d time.Duration) {
 	m.turnStageWindow.Observe(stage, ms)
 }
 
+func (m *Metrics) ObserveTurnIndicator(name string) {
+	if m == nil || m.turnStageWindow == nil {
+		return
+	}
+	m.turnStageWindow.ObserveIndicator(name)
+}
+
 func (m *Metrics) ObserveOutboundMessage(msgType, result string) {
 	m.OutboundMessages.WithLabelValues(msgType, result).Inc()
 }

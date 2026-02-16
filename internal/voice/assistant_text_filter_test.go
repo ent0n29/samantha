@@ -117,3 +117,17 @@ func TestLeadResponseFilterKeepsAcknowledgementWithoutFiller(t *testing.T) {
 		t.Fatalf("Consume() = %q, want %q", got, want)
 	}
 }
+
+func TestThinkingDeltaPreviewStripsLeadFiller(t *testing.T) {
+	got := thinkingDeltaPreview("Give me a second while I think. I can start by profiling latency.")
+	want := "I can start by profiling latency."
+	if got != want {
+		t.Fatalf("thinkingDeltaPreview() = %q, want %q", got, want)
+	}
+}
+
+func TestThinkingDeltaPreviewSuppressesPureAck(t *testing.T) {
+	if got := thinkingDeltaPreview("Sure."); got != "" {
+		t.Fatalf("thinkingDeltaPreview() = %q, want empty for pure acknowledgement", got)
+	}
+}

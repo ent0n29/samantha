@@ -36,6 +36,10 @@ type cancelTaskRequest struct {
 	Reason string `json:"reason"`
 }
 
+type pauseTaskRequest struct {
+	Reason string `json:"reason"`
+}
+
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	if s.taskService == nil || !s.taskService.Enabled() {
 		respondError(w, http.StatusNotImplemented, "task_runtime_disabled", "Task runtime is disabled.")
@@ -185,6 +189,62 @@ func (s *Server) handleCancelTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		respondError(w, http.StatusBadRequest, "task_cancel_failed", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handlePauseTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskService == nil || !s.taskService.Enabled() {
+		respondError(w, http.StatusNotImplemented, "task_runtime_disabled", "Task runtime is disabled.")
+		return
+	}
+	taskID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if taskID == "" {
+		respondError(w, http.StatusBadRequest, "invalid_task_id", "missing task id")
+		return
+	}
+
+	reason := "Paused by API."
+	var req pauseTaskRequest
+	if err := decodeJSON(r, &req); err != nil && !errors.Is(err, errEmptyBody) {
+		respondError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Reason) != "" {
+		reason = strings.TrimSpace(req.Reason)
+	}
+
+	task, err := s.taskService.PauseTask(r.Context(), taskID, reason)
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			respondError(w, http.StatusNotFound, "task_not_found", err.Error())
+			return
+		}
+		respondError(w, http.StatusBadRequest, "task_pause_failed", err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, task)
+}
+
+func (s *Server) handleResumeTask(w http.ResponseWriter, r *http.Request) {
+	if s.taskService == nil || !s.taskService.Enabled() {
+		respondError(w, http.StatusNotImplemented, "task_runtime_disabled", "Task runtime is disabled.")
+		return
+	}
+	taskID := strings.TrimSpace(chi.URLParam(r, "id"))
+	if taskID == "" {
+		respondError(w, http.StatusBadRequest, "invalid_task_id", "missing task id")
+		return
+	}
+
+	task, err := s.taskService.ResumeTask(r.Context(), taskID)
+	if err != nil {
+		if errors.Is(err, tasks.ErrTaskNotFound) {
+			respondError(w, http.StatusNotFound, "task_not_found", err.Error())
+			return
+		}
+		respondError(w, http.StatusBadRequest, "task_resume_failed", err.Error())
 		return
 	}
 	respondJSON(w, http.StatusOK, task)

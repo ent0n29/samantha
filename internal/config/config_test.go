@@ -33,6 +33,21 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if cfg.OpenClawCLIStreamMinChars != 16 {
 		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 16)
 	}
+	if cfg.LocalSTTProfile != "balanced" {
+		t.Fatalf("LocalSTTProfile = %q, want %q", cfg.LocalSTTProfile, "balanced")
+	}
+	if !cfg.LocalSTTAutoDownload {
+		t.Fatalf("LocalSTTAutoDownload = false, want true")
+	}
+	if cfg.LocalWhisperModelPath != ".models/whisper/ggml-base.en.bin" {
+		t.Fatalf("LocalWhisperModelPath = %q, want %q", cfg.LocalWhisperModelPath, ".models/whisper/ggml-base.en.bin")
+	}
+	if cfg.LocalWhisperBeamSize != 2 {
+		t.Fatalf("LocalWhisperBeamSize = %d, want %d", cfg.LocalWhisperBeamSize, 2)
+	}
+	if cfg.LocalWhisperBestOf != 2 {
+		t.Fatalf("LocalWhisperBestOf = %d, want %d", cfg.LocalWhisperBestOf, 2)
+	}
 	if cfg.AssistantWorkingDelay != 500*time.Millisecond {
 		t.Fatalf("AssistantWorkingDelay = %s, want 500ms", cfg.AssistantWorkingDelay)
 	}
@@ -41,6 +56,27 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	}
 	if cfg.UISilenceBreakerDelay != 750*time.Millisecond {
 		t.Fatalf("UISilenceBreakerDelay = %s, want 750ms", cfg.UISilenceBreakerDelay)
+	}
+	if cfg.UIVADMinUtterance != 650*time.Millisecond {
+		t.Fatalf("UIVADMinUtterance = %s, want 650ms", cfg.UIVADMinUtterance)
+	}
+	if cfg.UIVADGrace != 220*time.Millisecond {
+		t.Fatalf("UIVADGrace = %s, want 220ms", cfg.UIVADGrace)
+	}
+	if cfg.UIAudioSegmentOverlap != 22*time.Millisecond {
+		t.Fatalf("UIAudioSegmentOverlap = %s, want 22ms", cfg.UIAudioSegmentOverlap)
+	}
+	if cfg.UIFillerMode != "adaptive" {
+		t.Fatalf("UIFillerMode = %q, want %q", cfg.UIFillerMode, "adaptive")
+	}
+	if cfg.UIFillerMinDelay != 1200*time.Millisecond {
+		t.Fatalf("UIFillerMinDelay = %s, want 1200ms", cfg.UIFillerMinDelay)
+	}
+	if cfg.UIFillerCooldown != 18*time.Second {
+		t.Fatalf("UIFillerCooldown = %s, want 18s", cfg.UIFillerCooldown)
+	}
+	if cfg.UIFillerMaxPerTurn != 1 {
+		t.Fatalf("UIFillerMaxPerTurn = %d, want 1", cfg.UIFillerMaxPerTurn)
 	}
 	if cfg.UITaskDeskDefault {
 		t.Fatalf("UITaskDeskDefault = true, want false")
@@ -167,6 +203,15 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	t.Setenv("APP_ASSISTANT_WORKING_DELAY", "320ms")
 	t.Setenv("APP_UI_SILENCE_BREAKER_MODE", "off")
 	t.Setenv("APP_UI_SILENCE_BREAKER_DELAY", "1400ms")
+	t.Setenv("APP_UI_VAD_MIN_UTTERANCE", "800ms")
+	t.Setenv("APP_UI_VAD_GRACE", "260ms")
+	t.Setenv("APP_UI_AUDIO_SEGMENT_OVERLAP", "30ms")
+	t.Setenv("APP_FILLER_MODE", "off")
+	t.Setenv("APP_FILLER_MIN_DELAY", "1600ms")
+	t.Setenv("APP_FILLER_COOLDOWN", "27s")
+	t.Setenv("APP_FILLER_MAX_PER_TURN", "2")
+	t.Setenv("APP_LOCAL_STT_PROFILE", "fast")
+	t.Setenv("APP_LOCAL_STT_AUTO_MODEL_DOWNLOAD", "false")
 	t.Setenv("APP_UI_TASK_DESK_DEFAULT", "true")
 	t.Setenv("APP_UI_VAD_PROFILE", "default")
 	t.Setenv("OPENCLAW_HTTP_STREAM_STRICT", "true")
@@ -205,6 +250,33 @@ func TestLoadParsesSessionRetention(t *testing.T) {
 	if cfg.UISilenceBreakerDelay != 1400*time.Millisecond {
 		t.Fatalf("UISilenceBreakerDelay = %s, want 1400ms", cfg.UISilenceBreakerDelay)
 	}
+	if cfg.UIVADMinUtterance != 800*time.Millisecond {
+		t.Fatalf("UIVADMinUtterance = %s, want 800ms", cfg.UIVADMinUtterance)
+	}
+	if cfg.UIVADGrace != 260*time.Millisecond {
+		t.Fatalf("UIVADGrace = %s, want 260ms", cfg.UIVADGrace)
+	}
+	if cfg.UIAudioSegmentOverlap != 30*time.Millisecond {
+		t.Fatalf("UIAudioSegmentOverlap = %s, want 30ms", cfg.UIAudioSegmentOverlap)
+	}
+	if cfg.UIFillerMode != "off" {
+		t.Fatalf("UIFillerMode = %q, want %q", cfg.UIFillerMode, "off")
+	}
+	if cfg.UIFillerMinDelay != 1600*time.Millisecond {
+		t.Fatalf("UIFillerMinDelay = %s, want 1600ms", cfg.UIFillerMinDelay)
+	}
+	if cfg.UIFillerCooldown != 27*time.Second {
+		t.Fatalf("UIFillerCooldown = %s, want 27s", cfg.UIFillerCooldown)
+	}
+	if cfg.UIFillerMaxPerTurn != 2 {
+		t.Fatalf("UIFillerMaxPerTurn = %d, want 2", cfg.UIFillerMaxPerTurn)
+	}
+	if cfg.LocalSTTProfile != "fast" {
+		t.Fatalf("LocalSTTProfile = %q, want %q", cfg.LocalSTTProfile, "fast")
+	}
+	if cfg.LocalSTTAutoDownload {
+		t.Fatalf("LocalSTTAutoDownload = true, want false")
+	}
 	if !cfg.UITaskDeskDefault {
 		t.Fatalf("UITaskDeskDefault = false, want true")
 	}
@@ -230,6 +302,68 @@ func TestLoadAcceptsPatientVADProfile(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsInvalidAudioSegmentOverlap(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9696")
+	t.Setenv("APP_UI_AUDIO_SEGMENT_OVERLAP", "500ms")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid APP_UI_AUDIO_SEGMENT_OVERLAP")
+	}
+	if !strings.Contains(err.Error(), "APP_UI_AUDIO_SEGMENT_OVERLAP") {
+		t.Fatalf("Load() error = %v, want APP_UI_AUDIO_SEGMENT_OVERLAP validation error", err)
+	}
+}
+
+func TestLoadRejectsInvalidFillerMode(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9797")
+	t.Setenv("APP_FILLER_MODE", "sometimes")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid APP_FILLER_MODE")
+	}
+	if !strings.Contains(err.Error(), "APP_FILLER_MODE") {
+		t.Fatalf("Load() error = %v, want APP_FILLER_MODE validation error", err)
+	}
+}
+
+func TestLoadRejectsInvalidLocalSTTProfile(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9898")
+	t.Setenv("APP_LOCAL_STT_PROFILE", "ultra")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatalf("Load() expected error for invalid APP_LOCAL_STT_PROFILE")
+	}
+	if !strings.Contains(err.Error(), "APP_LOCAL_STT_PROFILE") {
+		t.Fatalf("Load() error = %v, want APP_LOCAL_STT_PROFILE validation error", err)
+	}
+}
+
+func TestLoadAppliesLocalSTTProfilePresetDefaults(t *testing.T) {
+	setCoreEnvEmpty(t)
+	t.Setenv("APP_BIND_ADDR", ":9990")
+	t.Setenv("APP_LOCAL_STT_PROFILE", "accurate")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.LocalWhisperModelPath != ".models/whisper/ggml-small.en.bin" {
+		t.Fatalf("LocalWhisperModelPath = %q, want %q", cfg.LocalWhisperModelPath, ".models/whisper/ggml-small.en.bin")
+	}
+	if cfg.LocalWhisperBeamSize != 3 {
+		t.Fatalf("LocalWhisperBeamSize = %d, want 3", cfg.LocalWhisperBeamSize)
+	}
+	if cfg.LocalWhisperBestOf != 3 {
+		t.Fatalf("LocalWhisperBestOf = %d, want 3", cfg.LocalWhisperBestOf)
+	}
+}
+
 func setCoreEnvEmpty(t *testing.T) {
 	t.Helper()
 	keys := []string{
@@ -248,6 +382,13 @@ func setCoreEnvEmpty(t *testing.T) {
 		"APP_UI_AUDIO_WORKLET",
 		"APP_UI_SILENCE_BREAKER_MODE",
 		"APP_UI_SILENCE_BREAKER_DELAY",
+		"APP_UI_VAD_MIN_UTTERANCE",
+		"APP_UI_VAD_GRACE",
+		"APP_UI_AUDIO_SEGMENT_OVERLAP",
+		"APP_FILLER_MODE",
+		"APP_FILLER_MIN_DELAY",
+		"APP_FILLER_COOLDOWN",
+		"APP_FILLER_MAX_PER_TURN",
 		"APP_UI_TASK_DESK_DEFAULT",
 		"APP_UI_VAD_PROFILE",
 		"APP_WS_BACKPRESSURE_MODE",
@@ -265,6 +406,8 @@ func setCoreEnvEmpty(t *testing.T) {
 		"LOCAL_WHISPER_THREADS",
 		"LOCAL_WHISPER_BEAM_SIZE",
 		"LOCAL_WHISPER_BEST_OF",
+		"APP_LOCAL_STT_PROFILE",
+		"APP_LOCAL_STT_AUTO_MODEL_DOWNLOAD",
 		"LOCAL_KOKORO_PYTHON",
 		"LOCAL_KOKORO_WORKER_SCRIPT",
 		"LOCAL_KOKORO_VOICE",

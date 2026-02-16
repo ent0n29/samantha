@@ -4,9 +4,10 @@ set -euo pipefail
 BASE_URL="${1:-http://127.0.0.1:8080}"
 INTERVAL_SEC="${INTERVAL_SEC:-2}"
 SAMPLES="${SAMPLES:-0}" # 0 means infinite
-TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS:-400}"
-TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS:-900}"
-TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS:-3500}"
+TARGET_FIRST_TEXT_P95_MS="${TARGET_FIRST_TEXT_P95_MS:-550}"
+TARGET_FIRST_AUDIO_P95_MS="${TARGET_FIRST_AUDIO_P95_MS:-1400}"
+TARGET_TURN_TOTAL_P95_MS="${TARGET_TURN_TOTAL_P95_MS:-3200}"
+TARGET_ASSISTANT_WORKING_P95_MS="${TARGET_ASSISTANT_WORKING_P95_MS:-650}"
 FAIL_ON_TARGETS="${FAIL_ON_TARGETS:-0}"
 REQUIRE_SAMPLES="${REQUIRE_SAMPLES:-0}"
 MIN_STAGE_SAMPLES="${MIN_STAGE_SAMPLES:-1}"
@@ -20,7 +21,7 @@ seen_samples=0
 had_target_breach=0
 
 echo "Latency probe -> ${BASE_URL}/v1/perf/latency (interval=${INTERVAL_SEC}s samples=${SAMPLES:-0})"
-echo "Targets: first_text_p95<=${TARGET_FIRST_TEXT_P95_MS}ms first_audio_p95<=${TARGET_FIRST_AUDIO_P95_MS}ms turn_total_p95<=${TARGET_TURN_TOTAL_P95_MS}ms"
+echo "Targets: assistant_working_p95<=${TARGET_ASSISTANT_WORKING_P95_MS}ms first_text_p95<=${TARGET_FIRST_TEXT_P95_MS}ms first_audio_p95<=${TARGET_FIRST_AUDIO_P95_MS}ms turn_total_p95<=${TARGET_TURN_TOTAL_P95_MS}ms"
 echo "Fail on target breach: ${FAIL_ON_TARGETS}"
 echo "Require measured samples: ${REQUIRE_SAMPLES}"
 echo "Min stage samples before evaluating target: ${MIN_STAGE_SAMPLES}"
@@ -67,7 +68,7 @@ PY
       seen_samples=1
     fi
 
-    if ! JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$now" "$FAIL_ON_TARGETS" "$MIN_STAGE_SAMPLES" "$FAIL_EARLY" <<'PY'
+    if ! JSON_PAYLOAD="${json}" python3 - "$TARGET_FIRST_TEXT_P95_MS" "$TARGET_FIRST_AUDIO_P95_MS" "$TARGET_TURN_TOTAL_P95_MS" "$TARGET_ASSISTANT_WORKING_P95_MS" "$now" "$FAIL_ON_TARGETS" "$MIN_STAGE_SAMPLES" "$FAIL_EARLY" <<'PY'
 import json
 import os
 import sys
@@ -75,12 +76,13 @@ import sys
 target_text = float(sys.argv[1])
 target_audio = float(sys.argv[2])
 target_total = float(sys.argv[3])
-now = sys.argv[4]
-fail_on_targets = str(sys.argv[5]).strip().lower() in ("1", "true", "yes", "on")
-min_stage_samples = int(float(sys.argv[6]))
+target_working = float(sys.argv[4])
+now = sys.argv[5]
+fail_on_targets = str(sys.argv[6]).strip().lower() in ("1", "true", "yes", "on")
+min_stage_samples = int(float(sys.argv[7]))
 if min_stage_samples < 1:
     min_stage_samples = 1
-fail_early = str(sys.argv[7]).strip().lower() in ("1", "true", "yes", "on")
+fail_early = str(sys.argv[8]).strip().lower() in ("1", "true", "yes", "on")
 
 try:
     payload = json.loads(os.environ.get("JSON_PAYLOAD", "{}"))
@@ -121,6 +123,7 @@ def stage_line(name):
     tag = "warming" if samples < min_stage_samples else "measured"
     return f"{name}: p50={p50:.0f}ms p95={p95:.0f}ms n={samples} [{tag}]"
 
+line_working, fail_working = stage_eval("commit_to_assistant_working", target_working)
 line_text, fail_text = stage_eval("commit_to_first_text", target_text)
 line_audio, fail_audio = stage_eval("commit_to_first_audio", target_audio)
 line_total, fail_total = stage_eval("turn_total", target_total)
@@ -132,6 +135,8 @@ extras = [
 ]
 print(
     f"[{now}] "
+    + line_working
+    + " | "
     + line_text
     + " | "
     + line_audio
@@ -140,7 +145,7 @@ print(
     + " || "
     + " | ".join(extras)
 )
-if fail_on_targets and (fail_text or fail_audio or fail_total):
+if fail_on_targets and (fail_working or fail_text or fail_audio or fail_total):
     raise SystemExit(2 if fail_early else 11)
 PY
     then

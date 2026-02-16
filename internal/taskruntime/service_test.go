@@ -85,3 +85,80 @@ func TestServiceStoreMode(t *testing.T) {
 		t.Fatalf("enabled StoreMode() = %q, want %q", got, "in-memory")
 	}
 }
+
+func TestServicePauseResumeFlow(t *testing.T) {
+	svc := New(Config{
+		Enabled:           true,
+		TaskTimeout:       10 * time.Second,
+		IdempotencyWindow: 10 * time.Second,
+	}, blockingAdapter{}, nil)
+
+	task, _, err := svc.CreateTask(context.Background(), tasks.CreateRequest{
+		SessionID:  "s3",
+		UserID:     "u3",
+		IntentText: "capture notes for this session",
+	})
+	if err != nil {
+		t.Fatalf("CreateTask() error = %v", err)
+	}
+
+	waitTaskStatus(t, svc, task.ID, tasks.TaskStatusRunning, 2*time.Second)
+
+	paused, err := svc.PauseTask(context.Background(), task.ID, "Paused from test.")
+	if err != nil {
+		t.Fatalf("PauseTask() error = %v", err)
+	}
+	if paused.Status != tasks.TaskStatusPaused {
+		t.Fatalf("paused.Status = %q, want %q", paused.Status, tasks.TaskStatusPaused)
+	}
+
+	waitTaskStatus(t, svc, task.ID, tasks.TaskStatusPaused, 2*time.Second)
+
+	resumed, err := svc.ResumeTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("ResumeTask() error = %v", err)
+	}
+	if resumed.Status != tasks.TaskStatusRunning {
+		t.Fatalf("resumed.Status = %q, want %q", resumed.Status, tasks.TaskStatusRunning)
+	}
+
+	waitTaskStatus(t, svc, task.ID, tasks.TaskStatusRunning, 2*time.Second)
+
+	cancelled, err := svc.CancelTask(context.Background(), task.ID, "Cleanup cancel.")
+	if err != nil {
+		t.Fatalf("CancelTask() error = %v", err)
+	}
+	if cancelled.Status != tasks.TaskStatusCancelled {
+		t.Fatalf("cancelled.Status = %q, want %q", cancelled.Status, tasks.TaskStatusCancelled)
+	}
+}
+
+type blockingAdapter struct{}
+
+func (blockingAdapter) StreamResponse(ctx context.Context, _ openclaw.MessageRequest, onDelta openclaw.DeltaHandler) (openclaw.MessageResponse, error) {
+	if onDelta != nil {
+		_ = onDelta("running")
+	}
+	<-ctx.Done()
+	return openclaw.MessageResponse{}, ctx.Err()
+}
+
+func waitTaskStatus(t *testing.T, svc *Service, taskID string, want tasks.TaskStatus, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		got, err := svc.GetTask(taskID)
+		if err != nil {
+			t.Fatalf("GetTask() error = %v", err)
+		}
+		if got.Status == want {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	got, err := svc.GetTask(taskID)
+	if err != nil {
+		t.Fatalf("GetTask() final error = %v", err)
+	}
+	t.Fatalf("task status = %q, want %q", got.Status, want)
+}

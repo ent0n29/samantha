@@ -257,6 +257,84 @@ func TestManagerListEventsRespectsLimit(t *testing.T) {
 	}
 }
 
+func TestManagerCreateEmitsPlanGraphEvent(t *testing.T) {
+	m := NewManager(10 * time.Second)
+	ch, unsub := m.Subscribe("s-graph")
+	defer unsub()
+
+	_, _, _, err := m.Create(CreateRequest{
+		SessionID:  "s-graph",
+		UserID:     "u-graph",
+		IntentText: "create API endpoint then write tests then update docs",
+	}, "create API endpoint then write tests then update docs", RiskLevelMedium, false)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	found := false
+	deadline := time.After(400 * time.Millisecond)
+	for !found {
+		select {
+		case evt := <-ch:
+			if evt.Type != EventTaskPlanGraph {
+				continue
+			}
+			found = true
+			if evt.Graph == nil {
+				t.Fatalf("plan graph event graph=nil")
+			}
+			if len(evt.Graph.Nodes) < 2 {
+				t.Fatalf("plan graph nodes = %d, want >=2", len(evt.Graph.Nodes))
+			}
+			if len(evt.Graph.Edges) < 1 {
+				t.Fatalf("plan graph edges = %d, want >=1", len(evt.Graph.Edges))
+			}
+		case <-deadline:
+			t.Fatalf("did not receive %q event", EventTaskPlanGraph)
+		}
+	}
+}
+
+func TestManagerPauseResumeFlow(t *testing.T) {
+	m := NewManager(10 * time.Second)
+	task, _, startID, err := m.Create(CreateRequest{
+		SessionID:  "s-pause",
+		UserID:     "u-pause",
+		IntentText: "run deployment task",
+	}, "run deployment task", RiskLevelLow, false)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if startID == "" {
+		t.Fatalf("startID empty")
+	}
+
+	paused, nextID, err := m.Pause(task.ID, "Paused for review.")
+	if err != nil {
+		t.Fatalf("Pause() error = %v", err)
+	}
+	if nextID != "" {
+		t.Fatalf("Pause() nextID = %q, want empty", nextID)
+	}
+	if paused.Status != TaskStatusPaused {
+		t.Fatalf("paused.Status = %q, want %q", paused.Status, TaskStatusPaused)
+	}
+	if paused.Steps[0].Status != StepStatusPaused {
+		t.Fatalf("paused step status = %q, want %q", paused.Steps[0].Status, StepStatusPaused)
+	}
+
+	resumed, resumeStartID, err := m.Resume(task.ID)
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if resumed.Status != TaskStatusRunning {
+		t.Fatalf("resumed.Status = %q, want %q", resumed.Status, TaskStatusRunning)
+	}
+	if resumeStartID != task.ID {
+		t.Fatalf("resumeStartID = %q, want %q", resumeStartID, task.ID)
+	}
+}
+
 type fakeTaskStore struct {
 	mu    sync.Mutex
 	tasks map[string]Task

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ent0n29/samantha/internal/audio"
 )
@@ -30,6 +32,9 @@ type LocalConfig struct {
 	WhisperThreads   int
 	WhisperBeamSize  int
 	WhisperBestOf    int
+	STTProfile       string
+	// STTAutoDownloadMissing attempts to fetch the selected model when it is not present.
+	STTAutoDownloadMissing bool
 
 	KokoroPython       string
 	KokoroWorkerScript string
@@ -48,6 +53,75 @@ type LocalProvider struct {
 	kokoroTTS     *kokoroWorker
 }
 
+func downloadWhisperModelIfMissing(modelPath string) error {
+	modelPath = strings.TrimSpace(modelPath)
+	if modelPath == "" {
+		return fmt.Errorf("empty model path")
+	}
+	if _, err := os.Stat(modelPath); err == nil {
+		return nil
+	}
+	filename := strings.TrimSpace(filepath.Base(modelPath))
+	if filename == "" || filename == "." || filename == string(filepath.Separator) {
+		return fmt.Errorf("invalid model filename: %q", filename)
+	}
+	if !strings.HasPrefix(filename, "ggml-") || !strings.HasSuffix(filename, ".bin") {
+		return fmt.Errorf("unsupported model filename %q; expected whisper.cpp ggml model", filename)
+	}
+
+	modelDir := filepath.Dir(modelPath)
+	if err := os.MkdirAll(modelDir, 0o755); err != nil {
+		return err
+	}
+
+	url := "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" + filename
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("download failed: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+
+	tmpPath := modelPath + ".download"
+	if err := os.RemoveAll(tmpPath); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	n, copyErr := io.Copy(f, resp.Body)
+	closeErr := f.Close()
+	if copyErr != nil {
+		_ = os.Remove(tmpPath)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(tmpPath)
+		return closeErr
+	}
+	if n <= 0 {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("downloaded empty model payload")
+	}
+
+	if err := os.Rename(tmpPath, modelPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	return nil
+}
+
 func NewLocalProvider(cfg LocalConfig) (*LocalProvider, error) {
 	modelPath := strings.TrimSpace(cfg.WhisperModelPath)
 	if modelPath == "" {
@@ -56,6 +130,15 @@ func NewLocalProvider(cfg LocalConfig) (*LocalProvider, error) {
 	if !filepath.IsAbs(modelPath) {
 		if wd, err := os.Getwd(); err == nil {
 			modelPath = filepath.Join(wd, modelPath)
+		}
+	}
+	if _, err := os.Stat(modelPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) && cfg.STTAutoDownloadMissing {
+			if dlErr := downloadWhisperModelIfMissing(modelPath); dlErr != nil {
+				return nil, fmt.Errorf("whisper.cpp model not found: %s (auto-download failed: %v)", modelPath, dlErr)
+			}
+		} else {
+			return nil, fmt.Errorf("whisper.cpp model not found: %s", modelPath)
 		}
 	}
 	if _, err := os.Stat(modelPath); err != nil {
@@ -185,6 +268,7 @@ func (p *LocalProvider) StartSession(ctx context.Context, sessionID string) (STT
 		baseCancel: cancel,
 		workCh:     make(chan sttWork, 1),
 		workerDone: make(chan struct{}),
+		partialCfg: localSTTPartialConfigForProfile(p.cfg.STTProfile),
 	}
 	go s.worker()
 	return s, events, nil
@@ -239,6 +323,54 @@ type localSTTSession struct {
 
 	activeCancel context.CancelFunc
 	activeToken  int64
+
+	partialCfg           localSTTPartialConfig
+	partialCancel        context.CancelFunc
+	partialToken         int64
+	partialLastStartedAt time.Time
+	partialLastText      string
+	partialWG            sync.WaitGroup
+}
+
+type localSTTPartialConfig struct {
+	Enabled     bool
+	MinInterval time.Duration
+	MinAudio    time.Duration
+	MaxTail     time.Duration
+	Timeout     time.Duration
+}
+
+type localSTTPartialJob struct {
+	token      int64
+	ctx        context.Context
+	cancel     context.CancelFunc
+	pcm        []byte
+	sampleRate int
+}
+
+const localSTTPartialMinDeltaRunes = 3
+
+func localSTTPartialConfigForProfile(profile string) localSTTPartialConfig {
+	cfg := localSTTPartialConfig{
+		Enabled:     true,
+		MinInterval: 550 * time.Millisecond,
+		MinAudio:    700 * time.Millisecond,
+		MaxTail:     7 * time.Second,
+		Timeout:     8 * time.Second,
+	}
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "fast":
+		cfg.MinInterval = 420 * time.Millisecond
+		cfg.MinAudio = 500 * time.Millisecond
+		cfg.MaxTail = 6 * time.Second
+		cfg.Timeout = 6 * time.Second
+	case "accurate":
+		cfg.MinInterval = 950 * time.Millisecond
+		cfg.MinAudio = 1200 * time.Millisecond
+		cfg.MaxTail = 9 * time.Second
+		cfg.Timeout = 12 * time.Second
+	}
+	return cfg
 }
 
 func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, sampleRate int, commit bool) error {
@@ -270,8 +402,13 @@ func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, 
 		}
 	}
 
+	var partialJob *localSTTPartialJob
 	if !commit {
+		partialJob = s.nextPartialJobLocked(sampleRate)
 		s.mu.Unlock()
+		if partialJob != nil {
+			s.startPartialTranscribe(partialJob)
+		}
 		return nil
 	}
 
@@ -283,6 +420,14 @@ func (s *localSTTSession) SendAudioChunk(_ context.Context, audioBase64 string, 
 		s.activeCancel()
 		s.activeCancel = nil
 	}
+	if s.partialCancel != nil {
+		s.partialCancel()
+		s.partialCancel = nil
+	}
+	// Commit starts a new utterance lifecycle; invalidate stale partial state.
+	s.partialToken++
+	s.partialLastStartedAt = time.Time{}
+	s.partialLastText = ""
 	s.mu.Unlock()
 
 	if len(pcm) == 0 {
@@ -305,12 +450,17 @@ func (s *localSTTSession) Close() error {
 		s.activeCancel()
 		s.activeCancel = nil
 	}
+	if s.partialCancel != nil {
+		s.partialCancel()
+		s.partialCancel = nil
+	}
 	cancel := s.baseCancel
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	<-s.workerDone
+	s.partialWG.Wait()
 	return nil
 }
 
@@ -334,6 +484,141 @@ func (s *localSTTSession) enqueueWork(w sttWork) {
 		default:
 		}
 	}
+}
+
+func (s *localSTTSession) nextPartialJobLocked(sampleRate int) *localSTTPartialJob {
+	cfg := s.partialCfg
+	if !cfg.Enabled || s.whisper == nil {
+		return nil
+	}
+	if s.partialCancel != nil {
+		return nil
+	}
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	now := time.Now()
+	if !s.partialLastStartedAt.IsZero() && now.Sub(s.partialLastStartedAt) < cfg.MinInterval {
+		return nil
+	}
+	minBytes := bytesForAudioDuration(sampleRate, cfg.MinAudio)
+	if minBytes <= 0 {
+		minBytes = sampleRate * 2
+	}
+	if len(s.pcm) < minBytes {
+		return nil
+	}
+
+	tailBytes := bytesForAudioDuration(sampleRate, cfg.MaxTail)
+	if tailBytes <= 0 || tailBytes > len(s.pcm) {
+		tailBytes = len(s.pcm)
+	}
+	start := len(s.pcm) - tailBytes
+	pcm := make([]byte, tailBytes)
+	copy(pcm, s.pcm[start:])
+
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = 8 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(s.baseCtx, timeout)
+	s.partialToken++
+	token := s.partialToken
+	s.partialCancel = cancel
+	s.partialLastStartedAt = now
+	return &localSTTPartialJob{
+		token:      token,
+		ctx:        ctx,
+		cancel:     cancel,
+		pcm:        pcm,
+		sampleRate: sampleRate,
+	}
+}
+
+func (s *localSTTSession) startPartialTranscribe(job *localSTTPartialJob) {
+	if job == nil || len(job.pcm) == 0 {
+		return
+	}
+	s.partialWG.Add(1)
+	go func(j localSTTPartialJob) {
+		defer s.partialWG.Done()
+		text, err := s.whisper.Transcribe(j.ctx, j.pcm, j.sampleRate)
+		j.cancel()
+
+		s.mu.Lock()
+		if s.partialToken == j.token {
+			s.partialCancel = nil
+		}
+		closed := s.closed
+		if closed {
+			s.mu.Unlock()
+			return
+		}
+		if err != nil {
+			s.mu.Unlock()
+			// Best-effort preview only: commit STT path remains authoritative.
+			return
+		}
+		text = normalizeLocalPartialText(text)
+		if !shouldEmitLocalPartialUpdate(s.partialLastText, text) {
+			s.mu.Unlock()
+			return
+		}
+		s.partialLastText = text
+		s.mu.Unlock()
+
+		select {
+		case s.events <- STTEvent{
+			Type:       STTEventPartial,
+			Text:       text,
+			Confidence: 0.62,
+			Timestamp:  time.Now().UnixMilli(),
+		}:
+		default:
+		}
+	}(*job)
+}
+
+func normalizeLocalPartialText(raw string) string {
+	return strings.TrimSpace(raw)
+}
+
+func shouldEmitLocalPartialUpdate(prev, next string) bool {
+	prev = normalizeLocalPartialText(prev)
+	next = normalizeLocalPartialText(next)
+	if next == "" {
+		return false
+	}
+	if prev == "" {
+		return true
+	}
+	if prev == next {
+		return false
+	}
+	if strings.HasPrefix(prev, next) {
+		return false
+	}
+	if strings.HasPrefix(next, prev) {
+		delta := utf8.RuneCountInString(next) - utf8.RuneCountInString(prev)
+		if delta < localSTTPartialMinDeltaRunes {
+			return false
+		}
+	}
+	return true
+}
+
+func bytesForAudioDuration(sampleRate int, d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	if sampleRate <= 0 {
+		sampleRate = 16000
+	}
+	seconds := d.Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+	return int(float64(sampleRate*2) * seconds)
 }
 
 func (s *localSTTSession) worker() {

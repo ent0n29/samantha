@@ -146,6 +146,7 @@ func (m *Manager) Create(req CreateRequest, summary string, risk RiskLevel, requ
 		UserID:           req.UserID,
 		IntentText:       req.IntentText,
 		Summary:          summary,
+		PlanGraph:        BuildPlanGraph(summary, req.IntentText, risk, requiresApproval),
 		Mode:             req.Mode,
 		Priority:         req.Priority,
 		Status:           status,
@@ -186,6 +187,15 @@ func (m *Manager) Create(req CreateRequest, summary string, risk RiskLevel, requ
 		RiskLevel:        risk,
 		RequiresApproval: requiresApproval,
 		At:               now,
+	})
+	m.publishLocked(task.SessionID, Event{
+		Type:      EventTaskPlanGraph,
+		SessionID: task.SessionID,
+		TaskID:    task.ID,
+		Status:    task.Status,
+		Graph:     clonePlanGraphPtr(task.PlanGraph),
+		Detail:    fmt.Sprintf("Planned %d step(s).", len(task.PlanGraph.Nodes)),
+		At:        now,
 	})
 
 	if requiresApproval {
@@ -455,6 +465,110 @@ func (m *Manager) Cancel(taskID, reason string) (Task, string, error) {
 	return task.Clone(), nextID, nil
 }
 
+func (m *Manager) Pause(taskID, reason string) (Task, string, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Task{}, "", errors.New("task_id is required")
+	}
+	now := time.Now().UTC()
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Paused by user."
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return Task{}, "", ErrTaskNotFound
+	}
+	if task.Terminal() {
+		return task.Clone(), "", nil
+	}
+	if task.Status == TaskStatusPaused {
+		return task.Clone(), "", nil
+	}
+	wasActive := m.activeBySession[task.SessionID] == task.ID
+
+	task.Status = TaskStatusPaused
+	task.UpdatedAt = now
+	for i := range task.Steps {
+		if task.Steps[i].ID == task.CurrentStepID {
+			if task.Steps[i].Status == StepStatusRunning || task.Steps[i].Status == StepStatusPlanned {
+				task.Steps[i].Status = StepStatusPaused
+			}
+			break
+		}
+	}
+
+	m.removePendingLocked(task.SessionID, task.ID)
+	m.publishLocked(task.SessionID, Event{
+		Type:      EventTaskPlanDelta,
+		SessionID: task.SessionID,
+		TaskID:    task.ID,
+		Status:    task.Status,
+		TextDelta: reason,
+		Detail:    reason,
+		At:        now,
+	})
+	m.persistTask(task.Clone())
+
+	nextID := ""
+	if wasActive {
+		nextID = m.releaseAndStartNextLocked(task.SessionID, task.ID, now)
+	}
+	return task.Clone(), nextID, nil
+}
+
+func (m *Manager) Resume(taskID string) (Task, string, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return Task{}, "", errors.New("task_id is required")
+	}
+	now := time.Now().UTC()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	task, ok := m.tasks[taskID]
+	if !ok {
+		return Task{}, "", ErrTaskNotFound
+	}
+	if task.Terminal() {
+		return task.Clone(), "", nil
+	}
+	if task.Status != TaskStatusPaused && task.Status != TaskStatusPlanned {
+		return task.Clone(), "", fmt.Errorf("%w: resume is only valid in paused|planned", ErrInvalidTaskState)
+	}
+
+	task.Status = TaskStatusPlanned
+	task.UpdatedAt = now
+	for i := range task.Steps {
+		if task.Steps[i].ID == task.CurrentStepID {
+			if task.Steps[i].Status == StepStatusPaused {
+				task.Steps[i].Status = StepStatusPlanned
+			}
+			break
+		}
+	}
+
+	m.removePendingLocked(task.SessionID, task.ID)
+	startID := m.startOrQueueLocked(task, now)
+	m.publishLocked(task.SessionID, Event{
+		Type:      EventTaskPlanDelta,
+		SessionID: task.SessionID,
+		TaskID:    task.ID,
+		Status:    task.Status,
+		TextDelta: "Resumed.",
+		Detail:    "Resumed.",
+		At:        now,
+	})
+	m.persistTask(task.Clone())
+
+	return task.Clone(), startID, nil
+}
+
 func (m *Manager) Get(taskID string) (Task, error) {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
@@ -485,7 +599,11 @@ func (m *Manager) Get(taskID string) (Task, error) {
 	}
 	m.mu.Lock()
 	m.ensureTaskCachedLocked(persisted)
+	cached := m.tasks[persisted.ID]
 	m.mu.Unlock()
+	if cached != nil {
+		return cached.Clone(), nil
+	}
 	return persisted.Clone(), nil
 }
 
@@ -540,6 +658,9 @@ func (m *Manager) ListBySession(sessionID string, limit int) []Task {
 
 	out := make([]Task, 0, len(merged))
 	for _, t := range merged {
+		if len(t.PlanGraph.Nodes) == 0 {
+			t.PlanGraph = BuildPlanGraph(t.Summary, t.IntentText, t.RiskLevel, t.RequiresApproval)
+		}
 		out = append(out, t)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -618,6 +739,23 @@ func (m *Manager) ActiveTask(sessionID string) (Task, error) {
 	return t.Clone(), nil
 }
 
+func (m *Manager) LatestPaused(sessionID string) (Task, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return Task{}, errors.New("session_id is required")
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := m.tasksBySession[sessionID]
+	for i := len(ids) - 1; i >= 0; i-- {
+		t := m.tasks[ids[i]]
+		if t != nil && t.Status == TaskStatusPaused {
+			return t.Clone(), nil
+		}
+	}
+	return Task{}, ErrTaskNotFound
+}
+
 func (m *Manager) idempotencyKey(sessionID, intent string) string {
 	normalized := normalizeIntent(intent)
 	return sessionID + "|" + normalized
@@ -679,6 +817,9 @@ func (m *Manager) startOrQueueLocked(task *Task, now time.Time) string {
 }
 
 func (m *Manager) ensureTaskCachedLocked(task Task) {
+	if len(task.PlanGraph.Nodes) == 0 {
+		task.PlanGraph = BuildPlanGraph(task.Summary, task.IntentText, task.RiskLevel, task.RequiresApproval)
+	}
 	cloned := task.Clone()
 	t := cloned
 	m.tasks[task.ID] = &t
@@ -779,4 +920,17 @@ func normalizeIntent(in string) string {
 	}
 	parts := strings.Fields(in)
 	return strings.Join(parts, " ")
+}
+
+func clonePlanGraphPtr(g TaskPlanGraph) *TaskPlanGraph {
+	cp := g
+	if g.Nodes != nil {
+		cp.Nodes = make([]TaskPlanNode, len(g.Nodes))
+		copy(cp.Nodes, g.Nodes)
+	}
+	if g.Edges != nil {
+		cp.Edges = make([]TaskPlanEdge, len(g.Edges))
+		copy(cp.Edges, g.Edges)
+	}
+	return &cp
 }

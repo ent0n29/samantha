@@ -13,7 +13,7 @@ WHISPER_BUILD_DIR="$TOOLS_DIR/build/whisper.cpp-${WHISPER_VER}"
 WHISPER_BIN_DIR="$TOOLS_DIR/whispercpp/bin"
 WHISPER_LIB_DIR="$TOOLS_DIR/whispercpp/lib"
 
-MODEL_PATH="${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-tiny.en.bin}"
+MODEL_PATH="${LOCAL_WHISPER_MODEL_PATH:-.models/whisper/ggml-base.en.bin}"
 if [[ ! "$MODEL_PATH" = /* ]]; then
   MODEL_PATH="$ROOT/$MODEL_PATH"
 fi

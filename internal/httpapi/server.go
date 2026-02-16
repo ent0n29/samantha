@@ -98,6 +98,8 @@ func (s *Server) Router() http.Handler {
 	r.Post("/v1/tasks", s.handleCreateTask)
 	r.Post("/v1/tasks/{id}/approve", s.handleApproveTask)
 	r.Post("/v1/tasks/{id}/cancel", s.handleCancelTask)
+	r.Post("/v1/tasks/{id}/pause", s.handlePauseTask)
+	r.Post("/v1/tasks/{id}/resume", s.handleResumeTask)
 	r.Get("/v1/tasks/{id}", s.handleGetTask)
 	r.Get("/v1/tasks/{id}/events", s.handleListTaskEvents)
 	r.Get("/v1/tasks", s.handleListTasks)
@@ -348,6 +350,10 @@ func messageTypeOf(v any) (protocol.MessageType, bool) {
 		return m.Type, true
 	case protocol.STTCommitted:
 		return m.Type, true
+	case protocol.SemanticEndpointHint:
+		return m.Type, true
+	case protocol.AssistantThinkingDelta:
+		return m.Type, true
 	case protocol.AssistantTextDelta:
 		return m.Type, true
 	case protocol.AssistantAudioChunk:
@@ -359,6 +365,8 @@ func messageTypeOf(v any) (protocol.MessageType, bool) {
 	case protocol.ErrorEvent:
 		return m.Type, true
 	case protocol.TaskCreated:
+		return m.Type, true
+	case protocol.TaskPlanGraph:
 		return m.Type, true
 	case protocol.TaskPlanDelta:
 		return m.Type, true

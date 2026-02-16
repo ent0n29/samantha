@@ -33,6 +33,7 @@ type Service struct {
 
 	mu             sync.Mutex
 	runningCancels map[string]context.CancelFunc
+	pauseRequested map[string]bool
 }
 
 func New(cfg Config, adapter openclaw.Adapter, metrics *observability.Metrics) *Service {
@@ -71,6 +72,7 @@ func New(cfg Config, adapter openclaw.Adapter, metrics *observability.Metrics) *
 		store:          store,
 		metrics:        metrics,
 		runningCancels: make(map[string]context.CancelFunc),
+		pauseRequested: make(map[string]bool),
 	}
 }
 
@@ -182,6 +184,7 @@ func (s *Service) CancelTask(ctx context.Context, taskID, reason string) (tasks.
 	if !s.Enabled() {
 		return tasks.Task{}, errors.New("task runtime is disabled")
 	}
+	s.clearPauseRequested(taskID)
 	if cancel := s.getRunningCancel(taskID); cancel != nil {
 		cancel()
 	}
@@ -208,6 +211,76 @@ func (s *Service) CancelActiveForSession(ctx context.Context, sessionID, reason 
 		return tasks.Task{}, err
 	}
 	return s.CancelTask(context.Background(), task.ID, reason)
+}
+
+func (s *Service) PauseTask(ctx context.Context, taskID, reason string) (tasks.Task, error) {
+	_ = ctx
+	if !s.Enabled() {
+		return tasks.Task{}, errors.New("task runtime is disabled")
+	}
+	if strings.TrimSpace(taskID) == "" {
+		return tasks.Task{}, errors.New("task_id is required")
+	}
+	s.setPauseRequested(taskID)
+	if cancel := s.getRunningCancel(taskID); cancel != nil {
+		cancel()
+	} else {
+		s.clearPauseRequested(taskID)
+	}
+	task, nextTaskID, err := s.manager.Pause(taskID, reason)
+	if err != nil {
+		s.clearPauseRequested(taskID)
+		return tasks.Task{}, err
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveTaskEvent("paused")
+	}
+	if nextTaskID != "" {
+		s.startTask(nextTaskID)
+	}
+	return task, nil
+}
+
+func (s *Service) PauseActiveForSession(ctx context.Context, sessionID, reason string) (tasks.Task, error) {
+	_ = ctx
+	if !s.Enabled() {
+		return tasks.Task{}, errors.New("task runtime is disabled")
+	}
+	task, err := s.manager.ActiveTask(sessionID)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+	return s.PauseTask(context.Background(), task.ID, reason)
+}
+
+func (s *Service) ResumeTask(ctx context.Context, taskID string) (tasks.Task, error) {
+	_ = ctx
+	if !s.Enabled() {
+		return tasks.Task{}, errors.New("task runtime is disabled")
+	}
+	task, startTaskID, err := s.manager.Resume(taskID)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+	if s.metrics != nil {
+		s.metrics.ObserveTaskEvent("resumed")
+	}
+	if startTaskID != "" {
+		s.startTask(startTaskID)
+	}
+	return task, nil
+}
+
+func (s *Service) ResumeLatestForSession(ctx context.Context, sessionID string) (tasks.Task, error) {
+	_ = ctx
+	if !s.Enabled() {
+		return tasks.Task{}, errors.New("task runtime is disabled")
+	}
+	task, err := s.manager.LatestPaused(sessionID)
+	if err != nil {
+		return tasks.Task{}, err
+	}
+	return s.ResumeTask(context.Background(), task.ID)
 }
 
 func (s *Service) GetTask(taskID string) (tasks.Task, error) {
@@ -247,6 +320,7 @@ func (s *Service) startTask(taskID string) {
 	go func(task tasks.Task, doneCancel context.CancelFunc) {
 		defer doneCancel()
 		defer s.clearRunningCancel(task.ID)
+		defer s.clearPauseRequested(task.ID)
 
 		if s.runner == nil {
 			_, nextTaskID, _ := s.manager.Fail(task.ID, "execution_unavailable", "Task runner is not configured.")
@@ -264,6 +338,16 @@ func (s *Service) startTask(taskID string) {
 		})
 		if runErr != nil {
 			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+				if s.consumePauseRequested(task.ID) {
+					_, nextTaskID, _ := s.manager.Pause(task.ID, "Task paused.")
+					if s.metrics != nil {
+						s.metrics.ObserveTaskEvent("paused")
+					}
+					if nextTaskID != "" {
+						s.startTask(nextTaskID)
+					}
+					return
+				}
 				_, nextTaskID, _ := s.manager.Cancel(task.ID, "Task cancelled.")
 				if s.metrics != nil {
 					s.metrics.ObserveTaskEvent("cancelled")
@@ -313,6 +397,38 @@ func (s *Service) clearRunningCancel(taskID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.runningCancels, taskID)
+}
+
+func (s *Service) setPauseRequested(taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if taskID = strings.TrimSpace(taskID); taskID != "" {
+		s.pauseRequested[taskID] = true
+	}
+}
+
+func (s *Service) consumePauseRequested(taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return false
+	}
+	if !s.pauseRequested[taskID] {
+		return false
+	}
+	delete(s.pauseRequested, taskID)
+	return true
+}
+
+func (s *Service) clearPauseRequested(taskID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return
+	}
+	delete(s.pauseRequested, taskID)
 }
 
 func (s *Service) Close() error {
