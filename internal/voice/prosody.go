@@ -9,7 +9,8 @@ type prosodyPlanner struct {
 
 const (
 	prosodyFirstChunkMin = 24
-	prosodyNextChunkMin  = 42
+	prosodyNextChunkMin  = 54
+	prosodyCommaChunkMin = 60
 	prosodyCutWindow     = 44
 )
 
@@ -62,7 +63,7 @@ func nextProsodySegment(input string, minChars int, force bool) (segment, rest s
 		return "", input, false
 	}
 
-	if idx := commaBoundary(input, minChars); idx >= 0 {
+	if idx := commaBoundary(input, maxInt(minChars, prosodyCommaChunkMin)); idx >= 0 {
 		return input[:idx+1], input[idx+1:], true
 	}
 	if idx := punctuationBoundary(input, minChars); idx >= 0 {
@@ -119,4 +120,11 @@ func normalizeProsodySegment(raw string) string {
 	}
 	parts := strings.Fields(raw)
 	return strings.TrimSpace(strings.Join(parts, " "))
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

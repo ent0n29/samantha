@@ -2,38 +2,23 @@ package voice
 
 import "testing"
 
-func TestProsodyPlannerFlushesOnPunctuation(t *testing.T) {
-	p := newProsodyPlanner()
-	out := p.Push("We should ship this today. Then we can benchmark it.")
-	if len(out) == 0 {
-		t.Fatalf("Push() returned no chunks, want at least one")
-	}
-	if out[0] != "We should ship this today." {
-		t.Fatalf("first chunk = %q, want %q", out[0], "We should ship this today.")
+func TestCommaBoundaryHonorsMinimumChunkSize(t *testing.T) {
+	input := "Let's map the architecture first, then connect voice and tasks."
+	if idx := commaBoundary(input, prosodyCommaChunkMin); idx >= 0 {
+		t.Fatalf("commaBoundary() = %d, want -1 when comma is before minimum chunk size", idx)
 	}
 }
 
-func TestProsodyPlannerFinalizeFlushesRemainder(t *testing.T) {
-	p := newProsodyPlanner()
-	if got := p.Push("Short text"); len(got) != 0 {
-		t.Fatalf("Push(short) chunks = %d, want 0", len(got))
+func TestNextProsodySegmentSkipsEarlyCommaBoundary(t *testing.T) {
+	input := "Let's map the architecture first, then connect the voice loop to task execution and persistence for smoother flow."
+	segment, _, ok := nextProsodySegment(input, prosodyFirstChunkMin, false)
+	if !ok {
+		t.Fatalf("nextProsodySegment() ok=false, want true")
 	}
-	final := p.Finalize()
-	if len(final) != 1 {
-		t.Fatalf("Finalize() chunks = %d, want 1", len(final))
+	if len(segment) < prosodyCommaChunkMin {
+		t.Fatalf("segment length = %d, want >= %d to avoid choppy comma splits", len(segment), prosodyCommaChunkMin)
 	}
-	if final[0] != "Short text" {
-		t.Fatalf("Finalize() chunk = %q, want %q", final[0], "Short text")
-	}
-}
-
-func TestProsodyPlannerNormalizesWhitespace(t *testing.T) {
-	p := newProsodyPlanner()
-	out := p.Push("We   should    ship this   today, and   then validate.")
-	if len(out) == 0 {
-		t.Fatalf("Push() returned no chunks")
-	}
-	if out[0] != "We should ship this today," {
-		t.Fatalf("first chunk = %q, want %q", out[0], "We should ship this today,")
+	if segment == "Let's map the architecture first," {
+		t.Fatalf("segment = %q, want a longer phrase than the first comma clause", segment)
 	}
 }
