@@ -176,7 +176,8 @@ if [[ "${REQUIRE_MIN_STAGE_SAMPLES}" == "1" ]]; then
     echo "No latency snapshot data available at probe end."
     exit 4
   fi
-  if ! JSON_PAYLOAD="${LATEST_JSON}" python3 - "$MIN_STAGE_SAMPLES" <<'PY'
+  py_rc=0
+  JSON_PAYLOAD="${LATEST_JSON}" python3 - "$MIN_STAGE_SAMPLES" <<'PY' || py_rc=$?
 import json
 import os
 import sys
@@ -205,8 +206,8 @@ if missing:
         print(f"- {item}")
     raise SystemExit(4)
 PY
-  then
-    exit $?
+  if [[ "${py_rc}" -ne 0 ]]; then
+    exit "${py_rc}"
   fi
 fi
 
