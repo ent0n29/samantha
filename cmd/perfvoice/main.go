@@ -107,7 +107,7 @@ func parseFlags() (options, error) {
 	flag.IntVar(&interTurnMS, "inter-turn-ms", 180, "delay between turns in milliseconds")
 	flag.IntVar(&turnTimeoutMS, "turn-timeout-ms", 15000, "timeout waiting for assistant_turn_end per turn in milliseconds")
 	flag.StringVar(&textsRaw, "texts", "", "utterances separated by '|' (optional)")
-	flag.BoolVar(&cfg.cacheBust, "cache-bust", true, "append a per-run nonce token to utterances to avoid cross-run brain-prefetch cache hits")
+	flag.BoolVar(&cfg.cacheBust, "cache-bust", false, "append a per-run nonce token to utterances to avoid cross-run brain-prefetch cache hits")
 	flag.BoolVar(&cfg.verbose, "verbose", true, "print replay progress")
 	flag.Parse()
 
