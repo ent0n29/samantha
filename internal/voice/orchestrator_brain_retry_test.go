@@ -183,3 +183,18 @@ func TestStreamResponseWithFirstDeltaRetryReturnsTimeoutErrorAfterExhaustion(t *
 		t.Fatalf("adapter calls = %d, want 2", adapter.Calls())
 	}
 }
+
+func TestDisableBrainFirstDeltaRetry(t *testing.T) {
+	if disableBrainFirstDeltaRetry(nil) {
+		t.Fatalf("disableBrainFirstDeltaRetry(nil) = true, want false")
+	}
+	if !disableBrainFirstDeltaRetry(&openclaw.GatewayAdapter{}) {
+		t.Fatalf("disableBrainFirstDeltaRetry(gateway) = false, want true")
+	}
+	if !disableBrainFirstDeltaRetry(openclaw.NewFallbackAdapter(&retryTestAdapter{}, &retryTestAdapter{})) {
+		t.Fatalf("disableBrainFirstDeltaRetry(fallback) = false, want true")
+	}
+	if disableBrainFirstDeltaRetry(&retryTestAdapter{}) {
+		t.Fatalf("disableBrainFirstDeltaRetry(retryTestAdapter) = true, want false")
+	}
+}

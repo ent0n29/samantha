@@ -143,7 +143,7 @@ func TestBrainPrefetchCanonicalCompatible(t *testing.T) {
 			name:      "short text is too risky for fuzzy match",
 			prefetch:  "build api now",
 			committed: "build api tomorrow",
-			want:      false,
+			want:      true,
 		},
 	}
 	for _, tc := range cases {

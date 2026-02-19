@@ -658,7 +658,16 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 			var cacheReady *brainPrefetchResult
 			brainPrefetchMu.Lock()
 			if brainPrefetchGen != gen || brainPrefetchCanonical != canonical {
+				if err == nil && (len(ready.deltas) > 0 || ready.finalText != "") {
+					cacheReady = &brainPrefetchResult{
+						canonicalInput: ready.canonicalInput,
+						deltas:         append([]string(nil), ready.deltas...),
+						finalText:      ready.finalText,
+					}
+					o.metrics.SessionEvents.WithLabelValues("brain_prefetch_ready_superseded").Inc()
+				}
 				brainPrefetchMu.Unlock()
+				storeBrainPrefetchCache(cacheReady)
 				return
 			}
 			brainPrefetchInFlight = false
@@ -1785,9 +1794,9 @@ func (o *Orchestrator) runAssistantTurn(
 		var streamErr error
 		retryTimeout := brainFirstDeltaRetryTimeout
 		retryMax := brainFirstDeltaRetryMax
-		if _, ok := o.adapter.(*openclaw.FallbackAdapter); ok {
-			// FallbackAdapter already enforces first-delta timeout and failover; avoid
-			// double-canceling the request before fallback can complete.
+		if disableBrainFirstDeltaRetry(o.adapter) {
+			// Gateway/fallback paths can legitimately emit no early delta and then complete.
+			// Retrying too early cancels an in-flight response and inflates tail latency.
 			retryTimeout = 0
 			retryMax = 0
 		}
@@ -2478,14 +2487,14 @@ func brainPrefetchCanonicalCompatible(prefetchedCanonical, committedCanonical st
 	if len(cWords) < minWords {
 		minWords = len(cWords)
 	}
-	if minWords < 4 {
+	if minWords < 3 {
 		return false
 	}
 	if absInt(len(pWords)-len(cWords)) > 2 {
 		return false
 	}
 	shared := sharedWordPrefixCount(pWords, cWords)
-	return shared >= minWords-1 && shared >= 3
+	return shared >= minWords-1 && shared >= 2
 }
 
 func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string) bool {
@@ -2500,7 +2509,7 @@ func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string
 	inFlightWords := wordsInCanonical(inFlightCanonical)
 	incomingWords := wordsInCanonical(incomingCanonical)
 	// If STT collapses the utterance by multiple words, treat it as a real rewrite and restart.
-	if incomingWords+1 < inFlightWords {
+	if incomingWords+2 < inFlightWords {
 		return false
 	}
 	if compactCanonical(inFlightCanonical) == compactCanonical(incomingCanonical) {
@@ -2518,6 +2527,13 @@ func shouldKeepBrainPrefetchInFlight(inFlightCanonical, incomingCanonical string
 		if sharedWordPrefixCount(strings.Fields(inFlightCanonical), strings.Fields(incomingCanonical)) >= 2 {
 			return true
 		}
+	}
+	// STT can rewrite the tail while keeping the same intent prefix. If we still share
+	// a strong word prefix and the incoming transcript is not a large rollback, keep
+	// the in-flight speculation to avoid cancel/restart churn.
+	shared := sharedWordPrefixCount(strings.Fields(inFlightCanonical), strings.Fields(incomingCanonical))
+	if shared >= 2 && incomingWords+3 >= inFlightWords {
+		return true
 	}
 	return false
 }
@@ -2598,6 +2614,19 @@ func wordsInCanonical(canonical string) int {
 		}
 	}
 	return words
+}
+
+func disableBrainFirstDeltaRetry(adapter openclaw.Adapter) bool {
+	if adapter == nil {
+		return false
+	}
+	if _, ok := adapter.(*openclaw.GatewayAdapter); ok {
+		return true
+	}
+	if _, ok := adapter.(*openclaw.FallbackAdapter); ok {
+		return true
+	}
+	return false
 }
 
 func thinkingDeltaPreview(raw string) string {
