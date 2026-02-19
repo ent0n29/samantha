@@ -53,6 +53,10 @@ const VAD_COMMIT_SILENCE_FLOOR_MAX_MS = 1600;
 const VAD_PARTIAL_FRESH_HOLD_MS = 420;
 const VAD_PARTIAL_PROGRESS_HOLD_MS = 360;
 const VAD_PARTIAL_ENDPOINT_FRAME_MS = 110;
+const VAD_PARTIAL_COMPLEX_HOLD_MS = 700;
+const VAD_PARTIAL_CONTINUATION_HOLD_MS = 860;
+const VAD_PARTIAL_COMPLEX_WORDS_MIN = 6;
+const VAD_COMPLEX_PARTIAL_COMMIT_SILENCE_MS = 440;
 const VAD_PROFILE_DEFAULT = "default";
 const VAD_TUNING_DEFAULT = {
   releaseFrames: 9,
@@ -1407,6 +1411,21 @@ function partialStabilityHoldMs(now) {
       hold = Math.max(hold, VAD_PARTIAL_PROGRESS_HOLD_MS - progressAge);
     }
   }
+  const partial = String(state.lastPartialText || "");
+  const partialAge = state.lastPartialAtMs > 0 ? now - state.lastPartialAtMs : Number.POSITIVE_INFINITY;
+  if (partial && partialAge <= VAD_SEMANTIC_HINT_STALE_MS) {
+    const canonical = state.lastPartialCanonical || canonicalizePartialText(partial);
+    const words = wordsInCanonical(canonical);
+    if (hasContinuationCue(partial)) {
+      if (partialAge < VAD_PARTIAL_CONTINUATION_HOLD_MS) {
+        hold = Math.max(hold, VAD_PARTIAL_CONTINUATION_HOLD_MS - partialAge);
+      }
+    } else if (!hasStrongStopCue(partial) && words >= VAD_PARTIAL_COMPLEX_WORDS_MIN) {
+      if (partialAge < VAD_PARTIAL_COMPLEX_HOLD_MS) {
+        hold = Math.max(hold, VAD_PARTIAL_COMPLEX_HOLD_MS - partialAge);
+      }
+    }
+  }
   return hold;
 }
 
@@ -1459,6 +1478,10 @@ function semanticCommitSilenceFloorMs(now, utteranceMs, partialText) {
         ? VAD_SHORT_UTTERANCE_COMMIT_SILENCE_MS
         : VAD_NEUTRAL_COMMIT_SILENCE_MS;
       floor = Math.max(floor, neutralFloor);
+      const canonical = state.lastPartialCanonical || canonicalizePartialText(partial);
+      if (wordsInCanonical(canonical) >= VAD_PARTIAL_COMPLEX_WORDS_MIN) {
+        floor = Math.max(floor, VAD_COMPLEX_PARTIAL_COMMIT_SILENCE_MS);
+      }
     }
   }
 

@@ -21,6 +21,29 @@ type pooledGatewayConn struct {
 	lastUsed time.Time
 }
 
+func (p *pooledGatewayConn) ensureConnectedLocked(ctx context.Context, a *GatewayAdapter) error {
+	if p.conn != nil && p.ws != nil {
+		return nil
+	}
+	conn, ws, err := a.dialAndConnect(ctx)
+	if err != nil {
+		return err
+	}
+	p.conn = conn
+	p.ws = ws
+	return nil
+}
+
+func (p *pooledGatewayConn) ensureConnected(ctx context.Context, a *GatewayAdapter) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.ensureConnectedLocked(ctx, a); err != nil {
+		return err
+	}
+	p.lastUsed = time.Now()
+	return nil
+}
+
 func (p *pooledGatewayConn) stream(
 	ctx context.Context,
 	a *GatewayAdapter,
@@ -30,13 +53,8 @@ func (p *pooledGatewayConn) stream(
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.conn == nil || p.ws == nil {
-		conn, ws, err := a.dialAndConnect(ctx)
-		if err != nil {
-			return MessageResponse{}, false, err
-		}
-		p.conn = conn
-		p.ws = ws
+	if err := p.ensureConnectedLocked(ctx, a); err != nil {
+		return MessageResponse{}, false, err
 	}
 
 	resp, keep, err := a.streamAgent(ctx, p.conn, p.ws, prompt, agentID, sessionKey, runID, onDelta)

@@ -335,16 +335,13 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 		return MessageResponse{}, nil
 	}
 
-	agentID := strings.TrimSpace(os.Getenv("OPENCLAW_AGENT_ID"))
-	if agentID == "" {
-		agentID = "samantha"
-	}
+	agentID := resolvedGatewayAgentID()
 
 	sessionID := strings.TrimSpace(req.SessionID)
 	if sessionID == "" {
 		sessionID = "main"
 	}
-	sessionKey := fmt.Sprintf("agent:%s:%s", agentID, sessionID)
+	sessionKey := gatewaySessionKey(agentID, sessionID)
 
 	runID := strings.TrimSpace(req.TurnID)
 	if runID == "" {
@@ -368,6 +365,38 @@ func (a *GatewayAdapter) StreamResponse(ctx context.Context, req MessageRequest,
 		a.dropPooledConn(sessionKey, pc)
 	}
 	return resp, err
+}
+
+// PrewarmSession establishes and caches a connected gateway websocket for the
+// given session key so the first real turn can skip handshake latency.
+func (a *GatewayAdapter) PrewarmSession(ctx context.Context, sessionID string) error {
+	if a == nil {
+		return errors.New("gateway adapter is nil")
+	}
+	agentID := resolvedGatewayAgentID()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = "main"
+	}
+	sessionKey := gatewaySessionKey(agentID, sessionID)
+	pc := a.getPooledConn(sessionKey)
+	if err := pc.ensureConnected(ctx, a); err != nil {
+		a.dropPooledConn(sessionKey, pc)
+		return err
+	}
+	return nil
+}
+
+func resolvedGatewayAgentID() string {
+	agentID := strings.TrimSpace(os.Getenv("OPENCLAW_AGENT_ID"))
+	if agentID == "" {
+		agentID = "samantha"
+	}
+	return agentID
+}
+
+func gatewaySessionKey(agentID, sessionID string) string {
+	return fmt.Sprintf("agent:%s:%s", strings.TrimSpace(agentID), strings.TrimSpace(sessionID))
 }
 
 func (a *GatewayAdapter) getPooledConn(sessionKey string) *pooledGatewayConn {
@@ -518,15 +547,13 @@ streamLoop:
 			if strings.TrimSpace(evt.RunID) != runID {
 				continue
 			}
-			if evt.Stream != "assistant" {
-				continue
-			}
-			var data agentAssistantData
-			if err := json.Unmarshal(evt.Data, &data); err != nil {
-				continue
-			}
-			delta := gatewayAssistantDelta(data)
+			delta := gatewayEventDelta(evt.Stream, evt.Data)
 			if strings.TrimSpace(delta) == "" {
+				continue
+			}
+			if unseen := unseenSuffix(outSB.String(), delta); unseen != "" {
+				delta = unseen
+			} else {
 				continue
 			}
 			outSB.WriteString(delta)
@@ -588,6 +615,67 @@ func gatewayAssistantDelta(data agentAssistantData) string {
 		return data.Text
 	}
 	return ""
+}
+
+func gatewayEventDelta(stream string, payload json.RawMessage) string {
+	if !gatewayStreamMayContainAssistantText(stream) {
+		return ""
+	}
+
+	var data agentAssistantData
+	if err := json.Unmarshal(payload, &data); err == nil {
+		if delta := strings.TrimSpace(gatewayAssistantDelta(data)); delta != "" {
+			return delta
+		}
+	}
+
+	raw := strings.TrimSpace(string(payload))
+	if raw == "" {
+		return ""
+	}
+	if parsed := strings.TrimSpace(parseCLIReply(raw)); parsed != "" {
+		return parsed
+	}
+	obj, ok := parseJSONObject(raw)
+	if !ok {
+		return ""
+	}
+	if text := pickStringField(obj, "delta", "text", "output", "message", "reply"); text != "" {
+		return text
+	}
+	if nested, ok := obj["data"].(map[string]any); ok {
+		if text := pickStringField(nested, "delta", "text", "output", "message", "reply"); text != "" {
+			return text
+		}
+	}
+	if nested, ok := obj["result"].(map[string]any); ok {
+		if text := pickStringField(nested, "delta", "text", "output", "message", "reply"); text != "" {
+			return text
+		}
+		if data, ok := nested["data"].(map[string]any); ok {
+			if text := pickStringField(data, "delta", "text", "output", "message", "reply"); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func gatewayStreamMayContainAssistantText(stream string) bool {
+	stream = strings.ToLower(strings.TrimSpace(stream))
+	if stream == "" {
+		return false
+	}
+	if stream == "assistant" || stream == "output" || stream == "text" {
+		return true
+	}
+	if strings.Contains(stream, "assistant") {
+		return true
+	}
+	if strings.Contains(stream, "response") {
+		return true
+	}
+	return false
 }
 
 func gatewayIsAcceptedAgentResponse(payload json.RawMessage) bool {

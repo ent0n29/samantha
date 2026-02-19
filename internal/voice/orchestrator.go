@@ -62,6 +62,10 @@ type Orchestrator struct {
 	taskService           *taskruntime.Service
 }
 
+type brainPrewarmCapable interface {
+	PrewarmSession(ctx context.Context, sessionID string) error
+}
+
 const (
 	memoryContextLimit            = 8
 	memoryContextTimeout          = 350 * time.Millisecond
@@ -85,6 +89,7 @@ const (
 	brainPrefetchCacheMaxEntries  = 24
 	brainFirstDeltaRetryTimeout   = 1400 * time.Millisecond
 	brainFirstDeltaRetryMax       = 1
+	brainWarmupTimeout            = 1800 * time.Millisecond
 	wakeWordWindow                = 30 * time.Second
 	memorySaveTimeout             = 2 * time.Second
 	ttsFinalizeTimeout            = 10 * time.Second
@@ -310,6 +315,8 @@ func (o *Orchestrator) RunConnection(ctx context.Context, s *session.Session, in
 		lastPartialAt          time.Time
 		semanticHintState      semanticEndpointDispatchState
 	)
+
+	o.startBrainSessionWarmup(ctx, s.ID)
 
 	startMemoryPrefetch := func() {
 		if o.memoryStore == nil {
@@ -1754,8 +1761,18 @@ func (o *Orchestrator) runAssistantTurn(
 	var res openclaw.MessageResponse
 	if prefetchedBrain != nil {
 		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_hit").Inc()
+		o.metrics.ObserveTurnIndicator("brain_prefetch_hit")
 		for _, delta := range prefetchedBrain.deltas {
 			if err := handleDelta(delta); err != nil {
+				_ = ttsStream.CloseInput(ctx)
+				return err
+			}
+		}
+		// Some adapters return only final text for speculative runs (no incremental deltas).
+		// Emit it through the same delta path so first-delta metrics and speech streaming
+		// still reflect this fast prefetch-hit path.
+		if strings.TrimSpace(prefetchedBrain.finalText) != "" && strings.TrimSpace(assistantOut) == "" {
+			if err := handleDelta(prefetchedBrain.finalText); err != nil {
 				_ = ttsStream.CloseInput(ctx)
 				return err
 			}
@@ -1763,6 +1780,7 @@ func (o *Orchestrator) runAssistantTurn(
 		res = openclaw.MessageResponse{Text: prefetchedBrain.finalText}
 	} else {
 		o.metrics.SessionEvents.WithLabelValues("brain_prefetch_miss").Inc()
+		o.metrics.ObserveTurnIndicator("brain_prefetch_miss")
 		retries := 0
 		var streamErr error
 		retryTimeout := brainFirstDeltaRetryTimeout
@@ -2213,6 +2231,56 @@ func normalizeControlReason(raw string) string {
 		return ""
 	}
 	return out
+}
+
+func (o *Orchestrator) prewarmAdapter() brainPrewarmCapable {
+	if o == nil || o.adapter == nil {
+		return nil
+	}
+	if warm, ok := o.adapter.(brainPrewarmCapable); ok {
+		return warm
+	}
+	if fb, ok := o.adapter.(*openclaw.FallbackAdapter); ok {
+		if primary := fb.Primary(); primary != nil {
+			if warm, ok := primary.(brainPrewarmCapable); ok {
+				return warm
+			}
+		}
+	}
+	return nil
+}
+
+func (o *Orchestrator) startBrainSessionWarmup(parent context.Context, sessionID string) {
+	warm := o.prewarmAdapter()
+	if warm == nil {
+		return
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	if o.metrics != nil && o.metrics.SessionEvents != nil {
+		o.metrics.SessionEvents.WithLabelValues("brain_warmup_start").Inc()
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(parent, brainWarmupTimeout)
+		defer cancel()
+		if err := warm.PrewarmSession(ctx, sessionID); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				if o.metrics != nil && o.metrics.SessionEvents != nil {
+					o.metrics.SessionEvents.WithLabelValues("brain_warmup_timeout").Inc()
+				}
+				return
+			}
+			if o.metrics != nil && o.metrics.SessionEvents != nil {
+				o.metrics.SessionEvents.WithLabelValues("brain_warmup_failed").Inc()
+			}
+			return
+		}
+		if o.metrics != nil && o.metrics.SessionEvents != nil {
+			o.metrics.SessionEvents.WithLabelValues("brain_warmup_ok").Inc()
+		}
+	}()
 }
 
 func streamResponseWithFirstDeltaRetry(
