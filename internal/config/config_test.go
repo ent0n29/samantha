@@ -30,8 +30,8 @@ func TestLoadDefaultsDoNotSetOpenClawHTTPURL(t *testing.T) {
 	if !cfg.OpenClawCLIStreaming {
 		t.Fatalf("OpenClawCLIStreaming = false, want true")
 	}
-	if cfg.OpenClawCLIStreamMinChars != 16 {
-		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 16)
+	if cfg.OpenClawCLIStreamMinChars != 8 {
+		t.Fatalf("OpenClawCLIStreamMinChars = %d, want %d", cfg.OpenClawCLIStreamMinChars, 8)
 	}
 	if cfg.LocalSTTProfile != "balanced" {
 		t.Fatalf("LocalSTTProfile = %q, want %q", cfg.LocalSTTProfile, "balanced")

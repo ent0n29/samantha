@@ -116,7 +116,7 @@ func Load() (Config, error) {
 		OpenClawCLIPath:           envOrDefault("OPENCLAW_CLI_PATH", "openclaw"),
 		OpenClawCLIThinking:       envOrDefault("OPENCLAW_CLI_THINKING", "minimal"),
 		OpenClawCLIStreaming:      true,
-		OpenClawCLIStreamMinChars: 16,
+		OpenClawCLIStreamMinChars: 8,
 		ElevenLabsAPIKey:          stringsTrimSpace("ELEVENLABS_API_KEY"),
 		DatabaseURL:               stringsTrimSpace("DATABASE_URL"),
 		MemoryEmbeddingDim:        1536,
